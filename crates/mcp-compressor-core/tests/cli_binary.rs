@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+const CLI_SCRIPT: &str = if cfg!(windows) { "alpha.cmd" } else { "alpha" };
+
 fn core_cmd() -> Command {
     Command::cargo_bin("mcp-compressor").unwrap()
 }
@@ -356,7 +358,7 @@ fn rust_cli_mode_installs_generated_script_in_path_candidate_by_default() {
     )
     .unwrap();
 
-    let expected_script = bin.canonicalize().unwrap().join("alpha");
+    let expected_script = bin.canonicalize().unwrap().join(CLI_SCRIPT);
 
     let mut cmd = core_cmd();
     cmd.env("HOME", &home)
@@ -373,21 +375,21 @@ fn rust_cli_mode_installs_generated_script_in_path_candidate_by_default() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "Generated CLI: {}",
+            "Generated CLI: {}\n",
             expected_script.display()
         )))
         .stdout(predicate::str::contains(
             "Invoke with: alpha <subcommand> [args...]",
         ));
 
-    assert!(bin.join("alpha").exists());
+    assert!(expected_script.exists());
 }
 
 #[test]
 fn rust_cli_mode_honors_explicit_output_dir() {
     let tempdir = tempfile::tempdir().unwrap();
     let output_dir = tempdir.path().join("custom-bin");
-    let expected_script = output_dir.join("alpha");
+    let expected_script = output_dir.join(CLI_SCRIPT);
 
     let mut cmd = core_cmd();
     cmd.env("MCP_COMPRESSOR_EXIT_AFTER_READY", "1")
@@ -404,7 +406,11 @@ fn rust_cli_mode_honors_explicit_output_dir() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "Generated CLI: {}",
+            "Generated CLI: {}\n",
+            expected_script.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Invoke with: {} <subcommand> [args...]",
             expected_script.display()
         )));
 
@@ -414,7 +420,7 @@ fn rust_cli_mode_honors_explicit_output_dir() {
 #[test]
 fn rust_cli_mode_manual_flow_generates_script_that_invokes_backend() {
     let tempdir = tempfile::tempdir().unwrap();
-    let output_dir = tempdir.path().join("generated");
+    let output_dir = tempdir.path().join("generated tools");
     let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin("mcp-compressor"));
     command
         .env("MCP_COMPRESSOR_CLI_OUTPUT_DIR", &output_dir)
@@ -435,6 +441,7 @@ fn rust_cli_mode_manual_flow_generates_script_that_invokes_backend() {
     let stdout = child.take_stdout();
     let mut reader = BufReader::new(stdout);
     let script_path = wait_for_generated_cli_path(&mut reader);
+    assert_eq!(PathBuf::from(&script_path), output_dir.join(CLI_SCRIPT));
 
     let help = StdCommand::new(&script_path)
         .arg("--help")

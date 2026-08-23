@@ -25,6 +25,9 @@ jobs:
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
 
+      - name: Check workflow contracts
+        run: uv run pytest -q tests/test_workflow_shell_safety.py
+
       - name: Run checks
         run: make check
 
@@ -123,6 +126,67 @@ jobs:
 
       - name: Compile all Rust core integration targets
         run: cargo test -p mcp-compressor-core --tests --no-run
+
+  windows-contracts:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up the Python environment
+        uses: ./.github/actions/setup-python-env
+
+      - name: Check workflow contracts
+        run: uv run pytest -q tests/test_workflow_shell_safety.py
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Run Rust core unit and integration tests including the CLI binary
+        run: cargo test -p mcp-compressor-core --tests -- --nocapture
+
+      - name: Run public Rust SDK tests
+        run: cargo test -p mcp-compressor --tests -- --nocapture
+
+      - name: Sync the Python environment
+        working-directory: python/mcp-compressor
+        run: uv sync --frozen --group dev
+
+      - name: Build the Python native extension
+        working-directory: python/mcp-compressor
+        run: uv run maturin develop
+
+      - name: Run Python package tests
+        working-directory: python/mcp-compressor
+        run: uv run pytest -q tests
+
+      - name: Install TypeScript dependencies
+        working-directory: typescript
+        run: bun install --frozen-lockfile
+
+      - name: Build the Rust core binary
+        working-directory: typescript
+        run: bun run build:core
+
+      - name: Build the TypeScript native addon
+        working-directory: typescript
+        run: bun run build:native
+
+      - name: Run TypeScript package checks and tests
+        working-directory: typescript
+        run: bun run check
+
+      - name: Run repository Python integration and public CLI tests
+        run: uv run pytest -q tests
 
   python-rust-package:
     runs-on: ubuntu-latest
