@@ -1,8 +1,41 @@
 mod common;
 
-use std::time::Duration;
+use std::{ffi::OsString, sync::Mutex};
 
 use mcp_compressor_core::app::entrypoint::run_from;
+
+const EXIT_AFTER_READY_ENV: &str = "MCP_COMPRESSOR_EXIT_AFTER_READY";
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn capture(name: &'static str) -> Self {
+        Self {
+            name,
+            previous: std::env::var_os(name),
+        }
+    }
+
+    fn set(name: &'static str, value: &str) -> Self {
+        let guard = Self::capture(name);
+        std::env::set_var(name, value);
+        guard
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(self.name, previous);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
 
 /// A caller stack far below what argument parsing plus the CLI's top-level
 /// future needs. Measured on Windows debug builds: without the entrypoint's own
@@ -23,6 +56,9 @@ const SMALL_CALLER_STACK_SIZE: usize = 256 * 1024;
 /// than failing an assertion.
 #[test]
 fn cli_entrypoint_runs_on_its_own_stack_not_the_callers() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tempdir = tempfile::tempdir().unwrap();
     let config_path = tempdir.path().join("mcp.json");
     // Serialized rather than interpolated: the fixture path is absolute, and on
@@ -37,7 +73,7 @@ fn cli_entrypoint_runs_on_its_own_stack_not_the_callers() {
     });
     std::fs::write(&config_path, config.to_string()).unwrap();
 
-    std::env::set_var("MCP_COMPRESSOR_EXIT_AFTER_READY", "1");
+    let _exit_after_ready = EnvVarGuard::set(EXIT_AFTER_READY_ENV, "1");
 
     let worker = std::thread::Builder::new()
         .stack_size(SMALL_CALLER_STACK_SIZE)
@@ -51,16 +87,40 @@ fn cli_entrypoint_runs_on_its_own_stack_not_the_callers() {
         })
         .expect("spawn small-stack caller");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    while !worker.is_finished() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the entrypoint did not return"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+    let result = worker.join().expect("the entrypoint thread panicked");
+    result.expect("the entrypoint must complete from a small caller stack");
+}
+
+#[test]
+fn env_var_guard_restores_previous_value_after_unwind() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _original = EnvVarGuard::set(EXIT_AFTER_READY_ENV, "original");
+
+    let panic = std::panic::catch_unwind(|| {
+        let _changed = EnvVarGuard::set(EXIT_AFTER_READY_ENV, "changed");
+        panic!("simulate test failure");
+    });
+
+    assert!(panic.is_err());
+    assert_eq!(
+        std::env::var_os(EXIT_AFTER_READY_ENV),
+        Some("original".into())
+    );
+}
+
+#[test]
+fn env_var_guard_removes_value_that_was_initially_absent() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _original = EnvVarGuard::capture(EXIT_AFTER_READY_ENV);
+    std::env::remove_var(EXIT_AFTER_READY_ENV);
+
+    {
+        let _changed = EnvVarGuard::set(EXIT_AFTER_READY_ENV, "changed");
     }
 
-    let result = worker.join().expect("the entrypoint thread panicked");
-    std::env::remove_var("MCP_COMPRESSOR_EXIT_AFTER_READY");
-    result.expect("the entrypoint must complete from a small caller stack");
+    assert_eq!(std::env::var_os(EXIT_AFTER_READY_ENV), None);
 }

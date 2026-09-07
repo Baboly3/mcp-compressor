@@ -43,12 +43,18 @@ where
     // gets 1 MiB on Windows, and embedders can call this from any thread. Do the
     // whole run on a thread whose stack we control, and give the runtime's
     // worker threads the same reserve so spawned work has equal headroom.
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .stack_size(CLI_STACK_SIZE)
         .spawn(move || run_on_current_thread(args))
-        .map_err(|error| CliError::Runtime(error.to_string()))?
-        .join()
-        .unwrap_or_else(|_| Err(CliError::Runtime("compressor run panicked".to_string())))
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    join_entrypoint_thread(thread)
+}
+
+fn join_entrypoint_thread<T>(thread: std::thread::JoinHandle<T>) -> T {
+    match thread.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn run_on_current_thread(args: Vec<std::ffi::OsString>) -> Result<(), CliError> {
@@ -229,4 +235,26 @@ pub enum CliError {
     Display(String),
     Usage(String),
     Runtime(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_entrypoint_thread;
+
+    #[test]
+    fn join_entrypoint_thread_preserves_panic_payload() {
+        let thread = std::thread::spawn(|| {
+            std::panic::panic_any(String::from("entrypoint panic payload"));
+        });
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            join_entrypoint_thread(thread)
+        }))
+        .expect_err("the entrypoint panic must resume on the caller");
+
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some("entrypoint panic payload")
+        );
+    }
 }
