@@ -26,7 +26,11 @@ fn select_script_dir(
     if windows {
         let candidate = candidates.into_iter().next()?;
         let resolved = candidate.canonicalize().unwrap_or(candidate);
-        let on_path = resolved.is_dir() && path_dirs.iter().any(|path_dir| path_dir == &resolved);
+        let on_path = path_dirs.iter().any(|path_dir| {
+            path_dir
+                .as_os_str()
+                .eq_ignore_ascii_case(resolved.as_os_str())
+        });
         return Some((resolved, on_path));
     }
 
@@ -41,10 +45,9 @@ fn select_script_dir(
 }
 
 fn candidate_script_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
-    candidate_script_dirs_for(cfg!(windows), home)
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let user_profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    candidate_script_dirs_for(cfg!(windows), home, user_profile)
 }
 
 /// Rank the directories a generated CLI may be installed into.
@@ -53,7 +56,12 @@ fn candidate_script_dirs() -> Vec<PathBuf> {
 /// `%LOCALAPPDATA%\Microsoft\WindowsApps` is on `PATH` by default, but it is
 /// reserved for App Execution Aliases and is rewritten by the Store, so it is
 /// never an installation candidate.
-fn candidate_script_dirs_for(windows: bool, home: Option<PathBuf>) -> Vec<PathBuf> {
+fn candidate_script_dirs_for(
+    windows: bool,
+    home: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let home = if windows { home.or(user_profile) } else { home };
     let mut candidates = Vec::new();
     if windows {
         if let Some(home) = &home {
@@ -86,7 +94,22 @@ mod tests {
 
     #[test]
     fn windows_only_offers_the_user_owned_directory() {
-        let candidates = candidate_script_dirs_for(true, Some(PathBuf::from(r"C:\Users\dev")));
+        let candidates = candidate_script_dirs_for(
+            true,
+            Some(PathBuf::from(r"C:\Users\dev")),
+            Some(PathBuf::from(r"C:\Users\fallback")),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from(r"C:\Users\dev").join(".local").join("bin")]
+        );
+    }
+
+    #[test]
+    fn windows_uses_userprofile_when_home_is_missing() {
+        let candidates =
+            candidate_script_dirs_for(true, None, Some(PathBuf::from(r"C:\Users\dev")));
 
         assert_eq!(
             candidates,
@@ -96,9 +119,23 @@ mod tests {
 
     #[test]
     fn windows_has_no_implicit_install_directory_without_a_home_directory() {
-        let candidates = candidate_script_dirs_for(true, None);
+        let candidates = candidate_script_dirs_for(true, None, None);
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn unix_does_not_use_userprofile_when_home_is_missing() {
+        let candidates =
+            candidate_script_dirs_for(false, None, Some(PathBuf::from("/windows/profile")));
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+            ]
+        );
     }
 
     #[test]
@@ -119,8 +156,29 @@ mod tests {
     }
 
     #[test]
+    fn windows_reports_nonexistent_user_owned_directory_as_on_path_when_listed() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let user_bin = tempdir.path().join(".local").join("bin");
+        assert!(!user_bin.exists());
+
+        let selected = select_script_dir(true, vec![user_bin.clone()], &[user_bin.clone()]);
+
+        assert_eq!(selected, Some((user_bin, true)));
+    }
+
+    #[test]
+    fn windows_matches_nonexistent_path_entries_case_insensitively() {
+        let user_bin = PathBuf::from(r"C:\Users\dev\.local\bin");
+        let listed_path = PathBuf::from(r"c:\users\DEV\.LOCAL\BIN");
+
+        let selected = select_script_dir(true, vec![user_bin.clone()], &[listed_path]);
+
+        assert_eq!(selected, Some((user_bin, true)));
+    }
+
+    #[test]
     fn unix_ranks_user_directories_before_shared_prefixes() {
-        let candidates = candidate_script_dirs_for(false, Some(PathBuf::from("/home/dev")));
+        let candidates = candidate_script_dirs_for(false, Some(PathBuf::from("/home/dev")), None);
 
         assert_eq!(
             candidates,
