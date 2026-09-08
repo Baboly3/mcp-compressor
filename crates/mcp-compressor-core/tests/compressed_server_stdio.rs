@@ -313,7 +313,7 @@ async fn mcp_frontend_toonifies_json_text_results() {
     .await
     .unwrap();
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         FrontendServer::new(server)
             .serve(server_transport)
             .await
@@ -322,7 +322,7 @@ async fn mcp_frontend_toonifies_json_text_results() {
             .await
             .unwrap();
     });
-    let client = ().serve(client_transport).await.unwrap();
+    let mut client = ().serve(client_transport).await.unwrap();
 
     let result = client
         .call_tool(
@@ -344,4 +344,7 @@ async fn mcp_frontend_toonifies_json_text_results() {
     );
     assert!(text.contains("1,alpha"), "expected TOON rows, got {text}");
     assert_eq!(result["content"][0]["annotations"]["priority"], json!(0.75));
+
+    client.close().await.unwrap();
+    server_task.await.unwrap();
 }
