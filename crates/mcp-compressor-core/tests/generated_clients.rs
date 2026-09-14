@@ -178,7 +178,7 @@ async fn generated_typescript_module_reports_stopped_proxy_without_fetch_noise()
         .find(|path| path.file_name().unwrap() == "alpha.ts")
         .unwrap();
 
-    drop(proxy);
+    proxy.shutdown().await.unwrap();
 
     let output = Command::new("bun")
         .arg("--eval")
@@ -319,7 +319,7 @@ async fn generated_cli_script_reports_stopped_proxy_without_traceback() {
         .find(|path| path.file_name().unwrap() == "alpha")
         .unwrap();
 
-    drop(proxy);
+    proxy.shutdown().await.unwrap();
 
     let output = generated_script_output(script, &["echo", "--message", "hello"]);
 
@@ -356,27 +356,44 @@ async fn generated_python_module_invokes_real_proxy_and_backend() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn generated_python_module_reports_stopped_proxy_without_urllib_traceback() {
     let tempdir = tempfile::tempdir().unwrap();
     let (config, proxy) = running_proxy_config(tempdir.path()).await;
+    let another_backend = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
     let mut config = config;
-    config.tools = real_backend_tools().await;
+    config.tools = another_backend.backend_tools();
     let paths = PythonGenerator.generate(&config).unwrap();
     let module = paths
         .iter()
         .find(|path| path.file_name().unwrap() == "alpha.py")
         .unwrap();
 
-    drop(proxy);
+    proxy.shutdown().await.unwrap();
 
-    let output = Command::new(common::python_command())
+    assert!(
+        tokio::net::TcpStream::connect(config.bridge_url.trim_start_matches("http://"))
+            .await
+            .is_err(),
+        "the stopped proxy must release its listener before launching the generated client"
+    );
+
+    let mut command = tokio::process::Command::new(common::python_command());
+    command
+        .kill_on_drop(true)
         .arg("-c")
         .arg(format!(
             "import sys; sys.path.insert(0, {dir:?}); import alpha; alpha.echo('hello')",
             dir = module.parent().unwrap().display().to_string()
-        ))
-        .output()
+        ));
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .expect("the generated Python client must exit when its proxy is stopped")
         .unwrap();
 
     assert!(!output.status.success());
