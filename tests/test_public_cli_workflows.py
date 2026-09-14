@@ -35,7 +35,7 @@ def test_public_cli_mode_creates_executable_script(tmp_path: Path) -> None:
         ],
         cwd=tmp_path,
         env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         timeout=30,
@@ -62,7 +62,7 @@ def test_public_code_modes_default_to_dist(tmp_path: Path) -> None:
             ],
             cwd=tmp_path,
             env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-            text=True,
+            encoding="utf-8",
             capture_output=True,
             check=True,
             timeout=30,
@@ -115,7 +115,7 @@ def test_public_backend_options_belong_after_separator(tmp_path: Path) -> None:
 
     before = subprocess.run(  # noqa: S603
         [str(BINARY), "--cwd", str(tmp_path), "--", PYTHON, str(FIXTURE)],
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=30,
     )
@@ -139,7 +139,7 @@ def test_public_backend_options_belong_after_separator(tmp_path: Path) -> None:
             "PUBLIC_WORKFLOW_SMOKE=1",
         ],
         env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         timeout=30,

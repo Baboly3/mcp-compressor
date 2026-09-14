@@ -166,7 +166,7 @@ async def test_rust_core_normal_streamable_http_mode_with_fixture_server() -> No
     process = subprocess.Popen(  # noqa: S603
         command,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
     )
     try:
         assert process.stderr is not None
@@ -217,7 +217,7 @@ async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend()
     process = subprocess.Popen(  # noqa: S603
         upstream,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
     )
     try:
         assert process.stderr is not None
