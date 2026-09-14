@@ -433,15 +433,26 @@ async fn generated_typescript_module_invokes_real_proxy_and_backend() {
 }
 
 fn golden(relative_path: &str) -> String {
-    std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("testdata/golden")
-            .join(relative_path),
+    normalize_cli_text(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("testdata/golden")
+                .join(relative_path),
+        )
+        .unwrap(),
     )
-    .unwrap()
-    .trim_end()
-    .to_string()
+}
+
+fn normalize_cli_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_end().to_string()
+}
+
+#[test]
+fn golden_text_normalizes_crlf_without_changing_content() {
+    for text in ["alpha  \n  echo\n\n", "alpha  \r\n  echo\r\n\r\n"] {
+        assert_eq!(normalize_cli_text(text), "alpha  \n  echo");
+    }
 }
 
 #[test]
@@ -809,11 +820,7 @@ fn run_generated_script(script: &std::path::Path, args: &[&str]) -> String {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .replace("\r\n", "\n")
-        .trim_end()
-        .to_string()
+    normalize_cli_text(&String::from_utf8(output.stdout).unwrap())
 }
 
 #[test]
