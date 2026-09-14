@@ -14,6 +14,36 @@ fn core_cmd() -> Command {
     Command::cargo_bin("mcp-compressor").unwrap()
 }
 
+fn with_isolated_oauth_store(test_name: &str, test: impl FnOnce(&std::path::Path)) {
+    const TEST_CONFIG: &str = "MCP_COMPRESSOR_TEST_OAUTH_CONFIG";
+    if let Some(config) = std::env::var_os(TEST_CONFIG) {
+        let config = PathBuf::from(config);
+        assert_eq!(
+            mcp_compressor_core::oauth::oauth_store_root(),
+            config.join("oauth-tokens-rust"),
+            "refusing to run credential cleanup outside the test store"
+        );
+        test(&config);
+        return;
+    }
+
+    let sandbox = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let config = sandbox.path().join("config with spaces");
+    let output = StdCommand::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(TEST_CONFIG, &config)
+        .env("MCP_COMPRESSOR_CONFIG_DIR", &config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated OAuth test failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
 #[test]
 fn rust_cli_help_describes_supported_modes() {
     let mut cmd = core_cmd();
@@ -35,18 +65,82 @@ fn rust_cli_help_describes_supported_modes() {
 
 #[test]
 fn rust_cli_clear_oauth_without_state_reports_no_credentials() {
-    let tempdir = tempfile::tempdir().unwrap();
-    let mut cmd = core_cmd();
-    cmd.env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("XDG_CONFIG_HOME", tempdir.path())
-        .env("HOME", tempdir.path().join("home"))
-        .arg("clear-oauth")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "No stored OAuth credentials found.",
-        ));
+    with_isolated_oauth_store(
+        "rust_cli_clear_oauth_without_state_reports_no_credentials",
+        |config| {
+            let mut cmd = core_cmd();
+            cmd.env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("MCP_COMPRESSOR_CONFIG_DIR", config)
+                .env("HOME", config.join("home"))
+                .arg("clear-oauth")
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(
+                    "No stored OAuth credentials found.",
+                ));
+        },
+    );
+}
+
+#[test]
+fn rust_cli_clear_oauth_removes_only_the_configured_store() {
+    with_isolated_oauth_store(
+        "rust_cli_clear_oauth_removes_only_the_configured_store",
+        |config| {
+            for target in [None, Some("example")] {
+                let root = config.join("oauth-tokens-rust");
+                let store = root.join("example-store");
+                let other_store = root.join("other-store");
+                let unrelated = config.join("unrelated-credentials");
+                std::fs::create_dir_all(&store).unwrap();
+                std::fs::create_dir_all(&other_store).unwrap();
+                std::fs::write(store.join("credentials.json"), "{}").unwrap();
+                std::fs::write(other_store.join("credentials.json"), "other credentials").unwrap();
+                std::fs::write(&unrelated, "must remain unchanged").unwrap();
+                let index = serde_json::json!([
+                    {
+                        "name": "example",
+                        "uri": "https://example.test/mcp",
+                        "store_dir": store,
+                    },
+                    {
+                        "name": "other",
+                        "uri": "https://other.test/mcp",
+                        "store_dir": other_store,
+                    }
+                ]);
+                std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap())
+                    .unwrap();
+
+                let mut cmd = core_cmd();
+                cmd.env("MCP_COMPRESSOR_CONFIG_DIR", config)
+                    .arg("clear-oauth");
+                if let Some(target) = target {
+                    cmd.arg(target);
+                }
+                cmd.assert().success();
+
+                assert!(!store.exists(), "configured credentials should be removed");
+                assert_eq!(
+                    std::fs::read_to_string(&unrelated).unwrap(),
+                    "must remain unchanged"
+                );
+                if target.is_none() {
+                    assert!(!root.exists());
+                } else {
+                    let remaining: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap())
+                            .unwrap();
+                    assert_eq!(remaining, serde_json::json!([index[1]]));
+                    assert_eq!(
+                        std::fs::read_to_string(other_store.join("credentials.json")).unwrap(),
+                        "other credentials"
+                    );
+                }
+            }
+        },
+    );
 }
 
 #[test]
