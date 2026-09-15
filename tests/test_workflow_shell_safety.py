@@ -37,13 +37,41 @@ def _pwsh_steps() -> list[tuple[str, str, str]]:
 def test_pwsh_steps_do_not_chain_multiple_commands() -> None:
     offenders = []
     for label, run, _job in _pwsh_steps():
-        commands = [line for line in run.splitlines() if line.strip()]
-        if len(commands) > 1 or any(operator in run for operator in (";", "&&", "||", "|", "`")):
+        commands = [line for line in run.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if len(commands) > 1 or any(
+            operator in command for command in commands for operator in (";", "&&", "||", "|", "`")
+        ):
             offenders.append(label)
 
     assert not offenders, (
         f"chained pwsh commands can hide an earlier native-command failure; split them into separate steps: {offenders}"
     )
+
+
+@pytest.mark.parametrize(
+    ("run", "chained"),
+    [
+        ("cargo test", False),
+        ("\n  # Explain the command\ncargo test\n", False),
+        ("# Avoid ; && || | ` chaining\ncargo test", False),
+        ("cargo test\n  # Trailing comment", False),
+        ("# Comment only; no commands", False),
+        ("cargo test\n# Separate commands\ncargo check", True),
+        *[(f"# Comment\ncargo test {operator} cargo check", True) for operator in (";", "&&", "||", "|", "`")],
+    ],
+)
+def test_pwsh_guard_distinguishes_comments_from_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: str, chained: bool
+) -> None:
+    workflow = {"jobs": {"example": {"defaults": {"run": {"shell": "pwsh"}}, "steps": [{"run": run}]}}}
+    (tmp_path / "example.yml").write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+
+    if chained:
+        with pytest.raises(AssertionError, match="chained pwsh commands"):
+            test_pwsh_steps_do_not_chain_multiple_commands()
+    else:
+        test_pwsh_steps_do_not_chain_multiple_commands()
 
 
 @pytest.mark.parametrize(
