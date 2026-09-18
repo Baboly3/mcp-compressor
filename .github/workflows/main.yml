@@ -25,6 +25,9 @@ jobs:
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
 
+      - name: Check workflow contracts
+        run: uv run pytest -q tests/test_workflow_shell_safety.py
+
       - name: Run checks
         run: make check
 
@@ -123,6 +126,116 @@ jobs:
 
       - name: Compile all Rust core integration targets
         run: cargo test -p mcp-compressor-core --tests --no-run
+
+  windows-tests:
+    name: windows-${{ matrix.suite }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [rust, python, typescript]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up the Python environment
+        uses: ./.github/actions/setup-python-env
+
+      - name: Check workflow contracts
+        run: uv run pytest -q tests/test_workflow_shell_safety.py
+
+      - name: Set up Bun
+        if: matrix.suite != 'python'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install TypeScript dependencies
+        if: matrix.suite != 'python'
+        working-directory: typescript
+        run: bun install --frozen-lockfile
+
+      - name: Lint TypeScript before native builds
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run lint
+
+      - name: Check TypeScript formatting before native builds
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run format:check
+
+      - name: Type-check TypeScript before native builds
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run typecheck
+
+      - name: Set up Rust
+        id: rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Windows Cargo artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.github/actions/setup-python-env/action.yml', 'python/mcp-compressor/uv.lock', 'typescript/bun.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.github/actions/setup-python-env/action.yml', 'python/mcp-compressor/uv.lock', 'typescript/bun.lock') }}-
+
+      - name: Run Rust core unit and integration tests including the CLI binary
+        if: matrix.suite == 'rust'
+        run: cargo test -p mcp-compressor-core --tests -- --nocapture
+
+      - name: Run public Rust SDK tests
+        if: matrix.suite == 'rust'
+        run: cargo test -p mcp-compressor --tests -- --nocapture
+
+      - name: Sync Python and build its native extension using debug Cargo artifacts
+        if: matrix.suite != 'typescript'
+        working-directory: python/mcp-compressor
+        run: uv sync --frozen --group dev --config-settings build-args=--profile=dev
+
+      - name: Run repository Python integration and public CLI tests
+        if: matrix.suite == 'rust'
+        run: uv run pytest -q tests
+
+      - name: Run Python package tests
+        if: matrix.suite == 'python'
+        working-directory: python/mcp-compressor
+        run: uv run --no-sync pytest -q tests
+
+      - name: Build the Rust core binary
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run build:core
+
+      - name: Build the TypeScript native addon
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run build:native
+
+      - name: Run TypeScript package checks and tests
+        if: matrix.suite == 'typescript'
+        working-directory: typescript
+        run: bun run check
+
+  windows-contracts:
+    runs-on: ubuntu-latest
+    needs: [windows-tests]
+    if: ${{ always() }}
+    steps:
+      - name: Require all Windows suites to pass
+        shell: pwsh
+        env:
+          WINDOWS_RESULT: ${{ needs.windows-tests.result }}
+        run: if ($env:WINDOWS_RESULT -ne 'success') { exit 1 }
 
   python-rust-package:
     runs-on: ubuntu-latest

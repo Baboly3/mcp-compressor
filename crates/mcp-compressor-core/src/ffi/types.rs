@@ -20,9 +20,9 @@ mod tests {
 
     #[test]
     fn ffi_lists_and_clears_oauth_credentials() {
-        let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let _env = crate::oauth::test_support::OAuthConfigGuard::set(Some(dir.path().as_os_str()));
+        assert_eq!(oauth_store_path(), dir.path().join("oauth-tokens-rust"));
 
         let store_dir = oauth_store_path().join("example-store");
         std::fs::create_dir_all(&store_dir).unwrap();
@@ -42,12 +42,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.backend_name == "example"));
-
-        if let Some(value) = previous {
-            std::env::set_var("XDG_CONFIG_HOME", value);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
     }
 
     #[test]

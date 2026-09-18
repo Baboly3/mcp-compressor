@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -1400,12 +1400,25 @@ describe("Rust native core wrapper", () => {
   });
 
   it("lists and clears OAuth credentials through the native addon", () => {
-    const previousXdg = process.env.XDG_CONFIG_HOME;
-    const previousHome = process.env.HOME;
-    const configHome = mkdtempSync(join(tmpdir(), "mcp-compressor-oauth-"));
-    process.env.XDG_CONFIG_HOME = configHome;
-    process.env.HOME = configHome;
+    const previousConfig = process.env.MCP_COMPRESSOR_CONFIG_DIR;
+    const configHome = mkdtempSync(join(process.cwd(), "mcp-compressor-oauth-"));
+    process.env.MCP_COMPRESSOR_CONFIG_DIR = configHome;
     try {
+      const root = join(configHome, "oauth-tokens-rust");
+      const sentinelStore = join(root, "isolation-sentinel");
+      mkdirSync(sentinelStore, { recursive: true });
+      writeFileSync(
+        join(root, "index.json"),
+        JSON.stringify([
+          {
+            name: "isolation-sentinel",
+            uri: "https://isolation.test/mcp",
+            store_dir: sentinelStore,
+          },
+        ]),
+      );
+      expect(listOAuthCredentials().some((entry) => entry.store_dir === sentinelStore)).toBe(true);
+      expect(clearOAuthCredentials("isolation-sentinel")).toEqual([sentinelStore]);
       expect(listOAuthCredentials()).toEqual([]);
       const storeDir = join(configHome, "oauth-store");
       mkdirSync(storeDir, { recursive: true });
@@ -1421,16 +1434,12 @@ describe("Rust native core wrapper", () => {
       expect(clearOAuthCredentials("example")).toEqual([storeDir]);
       expect(listOAuthCredentials()).toEqual([]);
     } finally {
-      if (previousXdg === undefined) {
-        delete process.env.XDG_CONFIG_HOME;
+      if (previousConfig === undefined) {
+        delete process.env.MCP_COMPRESSOR_CONFIG_DIR;
       } else {
-        process.env.XDG_CONFIG_HOME = previousXdg;
+        process.env.MCP_COMPRESSOR_CONFIG_DIR = previousConfig;
       }
-      if (previousHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = previousHome;
-      }
+      rmSync(configHome, { recursive: true, force: true });
     }
   });
 

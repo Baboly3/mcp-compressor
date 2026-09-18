@@ -7,23 +7,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "debug" / "mcp-compressor"
 FIXTURE = ROOT / "crates" / "mcp-compressor-core" / "tests" / "fixtures" / "alpha_server.py"
 PYTHON = os.environ.get("PYTHON", sys.executable)
 
 
-def _ensure_binary() -> None:
-    if not BINARY.exists():
-        subprocess.run(["cargo", "build", "-p", "mcp-compressor-core"], cwd=ROOT, check=True)  # noqa: S607
-
-
-def test_public_cli_mode_creates_executable_script(tmp_path: Path) -> None:
-    _ensure_binary()
+def test_public_cli_mode_creates_executable_script(tmp_path: Path, rust_core_binary: Path) -> None:
     output_dir = tmp_path / "bin"
 
     result = subprocess.run(  # noqa: S603
         [
-            str(BINARY),
+            str(rust_core_binary),
             "--cli-mode",
             "--server-name",
             "alpha",
@@ -35,7 +28,7 @@ def test_public_cli_mode_creates_executable_script(tmp_path: Path) -> None:
         ],
         cwd=tmp_path,
         env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         timeout=30,
@@ -45,13 +38,11 @@ def test_public_cli_mode_creates_executable_script(tmp_path: Path) -> None:
     assert (output_dir / "alpha").exists()
 
 
-def test_public_code_modes_default_to_dist(tmp_path: Path) -> None:
-    _ensure_binary()
-
+def test_public_code_modes_default_to_dist(tmp_path: Path, rust_core_binary: Path) -> None:
     for language, expected in [("python", "alpha.py"), ("typescript", "alpha.ts")]:
         result = subprocess.run(  # noqa: S603
             [
-                str(BINARY),
+                str(rust_core_binary),
                 "--code-mode",
                 language,
                 "--server-name",
@@ -62,7 +53,7 @@ def test_public_code_modes_default_to_dist(tmp_path: Path) -> None:
             ],
             cwd=tmp_path,
             env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-            text=True,
+            encoding="utf-8",
             capture_output=True,
             check=True,
             timeout=30,
@@ -73,10 +64,11 @@ def test_public_code_modes_default_to_dist(tmp_path: Path) -> None:
         assert (tmp_path / "dist" / expected).exists()
 
 
-async def test_public_multiserver_mcp_config_exposes_expected_wrapper_tools(tmp_path: Path) -> None:
+async def test_public_multiserver_mcp_config_exposes_expected_wrapper_tools(
+    tmp_path: Path, rust_core_binary: Path
+) -> None:
     from fastmcp import Client
 
-    _ensure_binary()
     config = tmp_path / "mcp.json"
     config.write_text(
         json.dumps({
@@ -93,7 +85,7 @@ async def test_public_multiserver_mcp_config_exposes_expected_wrapper_tools(tmp_
     async with Client({
         "mcpServers": {
             "rust": {
-                "command": str(BINARY),
+                "command": str(rust_core_binary),
                 "args": ["--compression", "max", "--config", str(config)],
             }
         }
@@ -110,12 +102,10 @@ async def test_public_multiserver_mcp_config_exposes_expected_wrapper_tools(tmp_
     }.issubset(tool_names)
 
 
-def test_public_backend_options_belong_after_separator(tmp_path: Path) -> None:
-    _ensure_binary()
-
+def test_public_backend_options_belong_after_separator(tmp_path: Path, rust_core_binary: Path) -> None:
     before = subprocess.run(  # noqa: S603
-        [str(BINARY), "--cwd", str(tmp_path), "--", PYTHON, str(FIXTURE)],
-        text=True,
+        [str(rust_core_binary), "--cwd", str(tmp_path), "--", PYTHON, str(FIXTURE)],
+        encoding="utf-8",
         capture_output=True,
         timeout=30,
     )
@@ -124,7 +114,7 @@ def test_public_backend_options_belong_after_separator(tmp_path: Path) -> None:
 
     after = subprocess.run(  # noqa: S603
         [
-            str(BINARY),
+            str(rust_core_binary),
             "--cli-mode",
             "--server-name",
             "alpha",
@@ -139,7 +129,7 @@ def test_public_backend_options_belong_after_separator(tmp_path: Path) -> None:
             "PUBLIC_WORKFLOW_SMOKE=1",
         ],
         env={**os.environ, "MCP_COMPRESSOR_EXIT_AFTER_READY": "1"},
-        text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         timeout=30,

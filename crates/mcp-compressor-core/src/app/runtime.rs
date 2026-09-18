@@ -142,9 +142,14 @@ pub async fn run_cli_mode(cli: CliOptions, server: CompressedServer) -> Result<(
     } else {
         generate_or_update_cli_script(&config).map_err(|error| error.to_string())?
     };
+    let script_name = if cfg!(windows) {
+        format!("{cli_name}.cmd")
+    } else {
+        cli_name.clone()
+    };
     let script = paths
         .iter()
-        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(cli_name.as_str()))
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(script_name.as_str()))
         .unwrap_or(&paths[0]);
 
     let transport_label = if cli.server_name.is_some() {

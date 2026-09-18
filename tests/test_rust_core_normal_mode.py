@@ -17,18 +17,13 @@ from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 PYTHON = os.environ.get("PYTHON", sys.executable)
 
 
-def rust_core_command(*args: str) -> list[str]:
-    return [
-        "cargo",
-        "run",
-        "-q",
-        "-p",
-        "mcp-compressor-core",
-        "--bin",
-        "mcp-compressor",
-        "--",
-        *args,
-    ]
+def rust_core_command(binary: Path, *args: str) -> list[str]:
+    return [str(binary), *args]
+
+
+def test_rust_core_command_uses_prebuilt_binary(tmp_path: Path) -> None:
+    binary = tmp_path / "bin with spaces" / "mcp-compressor.exe"
+    assert rust_core_command(binary, "--", "backend") == [str(binary), "--", "backend"]
 
 
 def multi_server_spec(name: str, script: Path) -> str:
@@ -38,10 +33,11 @@ def multi_server_spec(name: str, script: Path) -> str:
     return f"{name}={PYTHON} {script}"
 
 
-async def test_rust_core_normal_stdio_mode_with_fixture_server() -> None:
+async def test_rust_core_normal_stdio_mode_with_fixture_server(rust_core_binary: Path) -> None:
     root = Path(__file__).parents[1]
     alpha = root / "crates" / "mcp-compressor-core" / "tests" / "fixtures" / "alpha_server.py"
     command = rust_core_command(
+        rust_core_binary,
         "--compression",
         "max",
         "--server-name",
@@ -97,12 +93,13 @@ async def test_rust_core_normal_stdio_mode_with_fixture_server() -> None:
         assert prompt.messages[0].content.text == "alpha prompt"
 
 
-async def test_rust_core_normal_stdio_mode_with_multi_server_direct_config() -> None:
+async def test_rust_core_normal_stdio_mode_with_multi_server_direct_config(rust_core_binary: Path) -> None:
     root = Path(__file__).parents[1]
     fixture_dir = root / "crates" / "mcp-compressor-core" / "tests" / "fixtures"
     alpha = fixture_dir / "alpha_server.py"
     beta = fixture_dir / "beta_server.py"
     command = rust_core_command(
+        rust_core_binary,
         "--compression",
         "max",
         "--server-name",
@@ -147,10 +144,11 @@ async def test_rust_core_normal_stdio_mode_with_multi_server_direct_config() -> 
         assert "beta_prompt" in prompts
 
 
-async def test_rust_core_normal_streamable_http_mode_with_fixture_server() -> None:
+async def test_rust_core_normal_streamable_http_mode_with_fixture_server(rust_core_binary: Path) -> None:
     root = Path(__file__).parents[1]
     alpha = root / "crates" / "mcp-compressor-core" / "tests" / "fixtures" / "alpha_server.py"
     command = rust_core_command(
+        rust_core_binary,
         "--compression",
         "max",
         "--server-name",
@@ -166,7 +164,7 @@ async def test_rust_core_normal_streamable_http_mode_with_fixture_server() -> No
     process = subprocess.Popen(  # noqa: S603
         command,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
     )
     try:
         assert process.stderr is not None
@@ -198,10 +196,11 @@ async def test_rust_core_normal_streamable_http_mode_with_fixture_server() -> No
         process.wait(timeout=10)
 
 
-async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend() -> None:
+async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend(rust_core_binary: Path) -> None:
     root = Path(__file__).parents[1]
     alpha = root / "crates" / "mcp-compressor-core" / "tests" / "fixtures" / "alpha_server.py"
     upstream = rust_core_command(
+        rust_core_binary,
         "--compression",
         "max",
         "--server-name",
@@ -217,7 +216,7 @@ async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend()
     process = subprocess.Popen(  # noqa: S603
         upstream,
         stderr=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
     )
     try:
         assert process.stderr is not None
@@ -233,6 +232,7 @@ async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend()
         assert url is not None
 
         command = rust_core_command(
+            rust_core_binary,
             "--compression",
             "max",
             "--server-name",
@@ -262,7 +262,7 @@ async def test_rust_core_normal_stdio_mode_with_remote_streamable_http_backend()
         process.wait(timeout=10)
 
 
-async def test_rust_core_normal_stdio_mode_with_json_config(tmp_path: Path) -> None:
+async def test_rust_core_normal_stdio_mode_with_json_config(tmp_path: Path, rust_core_binary: Path) -> None:
     root = Path(__file__).parents[1]
     fixture_dir = root / "crates" / "mcp-compressor-core" / "tests" / "fixtures"
     alpha = fixture_dir / "alpha_server.py"
@@ -278,6 +278,7 @@ async def test_rust_core_normal_stdio_mode_with_json_config(tmp_path: Path) -> N
         encoding="utf-8",
     )
     command = rust_core_command(
+        rust_core_binary,
         "--compression",
         "max",
         "--config",

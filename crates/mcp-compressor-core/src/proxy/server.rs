@@ -64,7 +64,11 @@ impl ToolProxyServer {
             .route("/exec", post(exec))
             .with_state(state);
 
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
+        // std creates non-inheritable sockets on Windows, so later backend
+        // subprocesses cannot keep this listener alive after the proxy stops.
+        let listener = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+        listener.set_nonblocking(true)?;
+        let listener = TcpListener::from_std(listener)?;
         let addr = listener.local_addr()?;
         let task = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
@@ -152,6 +156,16 @@ impl Drop for RunningToolProxy {
 }
 
 impl RunningToolProxy {
+    /// Stop the HTTP listener and wait for its task to release the bound socket.
+    pub async fn shutdown(mut self) -> Result<(), tokio::task::JoinError> {
+        self.task.abort();
+        match (&mut self.task).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Shared handle to the underlying compressed server, used for in-process
     /// (bridge-less) dispatch by SDK sessions.
     pub fn server(&self) -> &Arc<CompressedServer> {

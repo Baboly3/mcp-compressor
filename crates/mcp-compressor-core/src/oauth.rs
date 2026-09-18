@@ -478,7 +478,13 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Explicit override because Windows Known Folder paths ignore HOME/XDG_CONFIG_HOME.
+const OAUTH_CONFIG_DIR_ENV: &str = "MCP_COMPRESSOR_CONFIG_DIR";
+
 pub fn oauth_store_root() -> PathBuf {
+    if let Some(dir) = env::var_os(OAUTH_CONFIG_DIR_ENV) {
+        return PathBuf::from(dir).join(OAUTH_TOKEN_DIR_NAME);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("mcp-compressor")
@@ -585,6 +591,66 @@ fn sanitize_file_component(value: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::ffi::{OsStr, OsString};
+    use std::sync::{Mutex, MutexGuard};
+
+    use super::OAUTH_CONFIG_DIR_ENV;
+
+    static OAUTH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct OAuthConfigGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl OAuthConfigGuard {
+        pub(crate) fn set(value: Option<&OsStr>) -> Self {
+            let lock = OAUTH_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let guard = Self {
+                previous: std::env::var_os(OAUTH_CONFIG_DIR_ENV),
+                _lock: lock,
+            };
+            match value {
+                Some(value) => std::env::set_var(OAUTH_CONFIG_DIR_ENV, value),
+                None => std::env::remove_var(OAUTH_CONFIG_DIR_ENV),
+            }
+            guard
+        }
+    }
+
+    impl Drop for OAuthConfigGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(OAUTH_CONFIG_DIR_ENV, value),
+                None => std::env::remove_var(OAUTH_CONFIG_DIR_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn oauth_config_guard_restores_environment_after_panic() {
+        let previous = {
+            let _lock = OAUTH_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            std::env::var_os(OAUTH_CONFIG_DIR_ENV)
+        };
+        let panic = std::panic::catch_unwind(|| {
+            let _env = OAuthConfigGuard::set(Some(OsStr::new("temporary-test-config")));
+            panic!("simulate an assertion failure");
+        });
+        assert!(panic.is_err());
+        let _lock = OAUTH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(std::env::var_os(OAUTH_CONFIG_DIR_ENV), previous);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -604,6 +670,23 @@ mod tests {
 
         assert!(store.load("missing-token").await.unwrap().is_none());
         store.delete("missing-token").await.unwrap();
+    }
+
+    #[test]
+    fn oauth_store_root_honors_explicit_config_dir_override() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let _env = test_support::OAuthConfigGuard::set(Some(dir.path().as_os_str()));
+        assert_eq!(oauth_store_root(), dir.path().join(OAUTH_TOKEN_DIR_NAME));
+    }
+
+    #[test]
+    fn oauth_store_root_preserves_platform_default_without_override() {
+        let _env = test_support::OAuthConfigGuard::set(None);
+        let expected = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("mcp-compressor")
+            .join(OAUTH_TOKEN_DIR_NAME);
+        assert_eq!(oauth_store_root(), expected);
     }
 
     #[test]

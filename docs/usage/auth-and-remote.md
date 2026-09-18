@@ -83,6 +83,18 @@ mcp-compressor clear-oauth remote
 
 Python and TypeScript also expose OAuth store helper APIs for applications that need to list or clear stored credentials.
 
+## Choose where credentials are stored
+
+By default the OAuth store lives under your platform config directory, for example `~/.config/mcp-compressor` on Linux, `~/Library/Application Support/mcp-compressor` on macOS, and `%APPDATA%\mcp-compressor` on Windows.
+
+Set `MCP_COMPRESSOR_CONFIG_DIR` to place the store somewhere else. The OAuth index and credentials are stored in its `oauth-tokens-rust` subdirectory. The same override applies to the CLI and the Rust, Python, and TypeScript SDKs:
+
+```bash
+MCP_COMPRESSOR_CONFIG_DIR=./mcp-compressor-sandbox mcp-compressor clear-oauth
+```
+
+This is the supported way to keep automated runs away from your real credentials. `HOME` and `XDG_CONFIG_HOME` do not redirect the store on Windows, because the default location resolves through the Windows Known Folder API.
+
 ## SDK auth providers
 
 When your application already owns token refresh, prefer SDK auth providers over embedding static headers in config. SDK auth providers are evaluated for each remote backend request in Rust, Python, and TypeScript.
