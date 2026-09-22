@@ -23,7 +23,8 @@ def echo(message: str) -> str:
 
 
 if __name__ == "__main__":
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    # Trusted interpreter and fixed child code.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])  # noqa: S603
     args.pid_file.with_suffix(".child.pid").write_text(str(child.pid), encoding="utf-8")
     try:
         with contextlib.suppress(KeyboardInterrupt):
