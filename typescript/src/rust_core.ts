@@ -157,14 +157,16 @@ export interface CompressedSessionInfo {
 }
 
 export class CompressedSession {
+  private closing: Promise<void> | null = null;
+
   constructor(private readonly nativeSession: NativeCompressedSession) {}
 
   info(): CompressedSessionInfo {
     return JSON.parse(this.nativeSession.infoJson()) as CompressedSessionInfo;
   }
 
-  close(): void {
-    this.nativeSession.close();
+  close(): Promise<void> {
+    return (this.closing ??= this.nativeSession.close());
   }
 
   updateAuthProviderHeaders(providerIndex: number, headers: Record<string, string>): void {

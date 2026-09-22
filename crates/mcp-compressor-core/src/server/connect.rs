@@ -8,6 +8,12 @@ use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioC
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::Value;
 
+use process_wrap::tokio::CommandWrap;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+
 use crate::compression::engine::Tool;
 use crate::oauth::{
     oauth_store_dir, open_authorization_url, remember_oauth_store, BrowserOpenStatus,
@@ -24,6 +30,24 @@ pub(crate) struct ConnectedBackend {
     pub tools: Vec<Tool>,
     pub resources: Vec<String>,
     pub prompts: Vec<Prompt>,
+    process_id: Option<u32>,
+    transport: BackendTransport,
+}
+
+impl ConnectedBackend {
+    /// Release the backend without consuming it.
+    ///
+    /// Session shutdown must not depend on being the last owner of the
+    /// server: while an HTTP bridge is draining, its connection tasks still
+    /// hold a clone, and an ownership-based shutdown would silently skip the
+    /// release and leak the backend process tree.
+    pub async fn shutdown_shared(&self) -> Result<(), Error> {
+        if matches!(self.transport, BackendTransport::Stdio) {
+            terminate_owned_process_tree(self.process_id).await;
+        }
+        self.client.cancellation_token().cancel();
+        Ok(())
+    }
 }
 
 pub(crate) async fn connect_backend(
@@ -32,9 +56,11 @@ pub(crate) async fn connect_backend(
     include_tools: &[String],
     exclude_tools: &[String],
 ) -> Result<ConnectedBackend, Error> {
-    let client = match backend.transport {
+    let (client, process_id) = match backend.transport {
         BackendTransport::Stdio => connect_stdio_backend(&backend).await?,
-        BackendTransport::StreamableHttp => connect_streamable_http_backend(&backend).await?,
+        BackendTransport::StreamableHttp => {
+            (connect_streamable_http_backend(&backend).await?, None)
+        }
     };
 
     let rmcp_tools = client
@@ -67,12 +93,14 @@ pub(crate) async fn connect_backend(
         tools,
         resources,
         prompts,
+        process_id,
+        transport: backend.transport,
     })
 }
 
 async fn connect_stdio_backend(
     backend: &BackendServerConfig,
-) -> Result<RunningService<RoleClient, ()>, Error> {
+) -> Result<(RunningService<RoleClient, ()>, Option<u32>), Error> {
     let mut command = tokio::process::Command::new(&backend.command);
     command
         .args(&backend.args)
@@ -86,10 +114,53 @@ async fn connect_stdio_backend(
         command.env(key, value);
     }
 
-    let transport = TokioChildProcess::new(command.configure(|_| {})).map_err(Error::Io)?;
+    let mut command = CommandWrap::from(command.configure(|_| {}));
+    #[cfg(windows)]
+    command.wrap(JobObject);
+    #[cfg(unix)]
+    command.wrap(ProcessGroup::leader());
+    let transport = TokioChildProcess::new(command).map_err(Error::Io)?;
+    let process_id = transport.id();
     ().serve(transport)
         .await
+        .map(|client| (client, process_id))
         .map_err(|error| Error::Config(error.to_string()))
+}
+
+#[cfg(windows)]
+async fn terminate_owned_process_tree(process_id: Option<u32>) {
+    let Some(process_id) = process_id else {
+        return;
+    };
+    let status = tokio::process::Command::new("taskkill")
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    match status {
+        Ok(status) if !status.success() => {
+            eprintln!("failed to terminate backend process tree {process_id}: {status}");
+        }
+        Err(error) => {
+            eprintln!("failed to terminate backend process tree {process_id}: {error}");
+        }
+        Ok(_) => {}
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_owned_process_tree(process_id: Option<u32>) {
+    let Some(process_id) = process_id else {
+        return;
+    };
+    let result = unsafe { libc::kill(-(process_id as i32), libc::SIGKILL) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("failed to terminate backend process group {process_id}: {error}");
+        }
+    }
 }
 
 async fn connect_streamable_http_backend(

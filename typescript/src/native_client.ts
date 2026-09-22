@@ -256,6 +256,7 @@ function transformMode(mode: NativeCompressorMode): string | null {
 
 export class CompressorProxy {
   private closed = false;
+  private closing: Promise<void> | null = null;
 
   constructor(
     private readonly session: CompressedSession,
@@ -364,9 +365,16 @@ export class CompressorProxy {
     return (await this.invokeWrapper(wrapper, { tool_name: tool, tool_input: toolInput })).text;
   }
 
-  close(): void {
+  close(): Promise<void> {
+    if (this.closing) {
+      return this.closing;
+    }
     this.closed = true;
-    this.session.close();
+    const closing = (this.closing = this.session.close());
+    // Callers that do not await must not turn a shutdown failure into an
+    // unhandled rejection, but callers that do await still see the error.
+    closing.catch((error) => console.error(`Failed to close compressor proxy: ${String(error)}`));
+    return closing;
   }
 
   toExecutableTools(): Record<string, ExecutableTool> {
@@ -455,8 +463,11 @@ export class CompressorClient {
   }
 
   async close(): Promise<void> {
-    this.session?.close();
-    this.session = null;
+    try {
+      await this.session?.close();
+    } finally {
+      this.session = null;
+    }
   }
 
   private defaultServer(): string | null {
