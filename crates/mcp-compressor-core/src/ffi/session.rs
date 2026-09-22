@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::proxy::{dispatch_exec, RunningToolProxy, ToolProxyServer};
+use crate::proxy::{dispatch_exec, BeforeExecHook, RunningToolProxy, ToolProxyServer};
 use crate::server::{CompressedServer, CompressedServerConfig, ProxyTransformMode};
 use crate::Error;
 
@@ -36,9 +36,9 @@ fn normalize_sdk_server(
             headers,
             oauth_app_name,
         } => {
-            let command_or_url = url
-                .or(command)
-                .ok_or_else(|| Error::Config(format!("server {name} must define command or url")))?;
+            let command_or_url = url.or(command).ok_or_else(|| {
+                Error::Config(format!("server {name} must define command or url"))
+            })?;
             if !headers.is_empty() {
                 let mut header_args = Vec::new();
                 for (key, value) in headers {
@@ -68,6 +68,10 @@ pub struct FfiCompressedSession {
     // Kept alive to keep the HTTP bridge running for out-of-process clients.
     // `None` for in-process (bridge-less) sessions.
     _proxy: Option<RunningToolProxy>,
+    // Applied to in-process invocations. A bridge runs the same hook for its
+    // own HTTP requests, but `invoke()` never goes through the bridge, so
+    // without this it would use credentials the caller already considers stale.
+    before_exec: Option<BeforeExecHook>,
 }
 
 impl FfiCompressedSession {
@@ -108,6 +112,9 @@ impl FfiCompressedSession {
     /// This shares [`dispatch_exec`] with the HTTP `/exec` bridge endpoint, so
     /// in-process and bridge invocations return identical payloads.
     pub async fn invoke(&self, tool: &str, input: Value) -> Result<String, Error> {
+        if let Some(before_exec) = &self.before_exec {
+            before_exec().await?;
+        }
         dispatch_exec(&self.server, tool.to_string(), input).await
     }
 
@@ -126,6 +133,7 @@ fn parse_ffi_transform_mode(value: Option<&str>) -> Result<ProxyTransformMode, E
 async fn compressed_session_from_server(
     server: CompressedServer,
     bridge: bool,
+    before_exec: Option<BeforeExecHook>,
 ) -> Result<FfiCompressedSession, Error> {
     let frontend_tools = server
         .list_frontend_tools()
@@ -133,7 +141,11 @@ async fn compressed_session_from_server(
         .into_iter()
         .map(FfiTool::from)
         .collect();
-    let backend_tools = server.backend_tools().into_iter().map(FfiTool::from).collect();
+    let backend_tools = server
+        .backend_tools()
+        .into_iter()
+        .map(FfiTool::from)
+        .collect();
     let backend_tools_by_server = server
         .backend_tools_by_server()
         .into_iter()
@@ -147,15 +159,28 @@ async fn compressed_session_from_server(
         .into_iter()
         .map(Into::into)
         .collect();
-    let (proxy, shared_server, bridge_url, token) = if bridge {
-        let proxy = ToolProxyServer::start(server).await?;
+    let (proxy, shared_server, bridge_url, token, in_process_before_exec) = if bridge {
+        // The hook has to stay on the session as well. A bridged session still
+        // dispatches `invoke()` in process, so it never reaches the bridge that
+        // would otherwise run the refresh.
+        let session_hook = before_exec.clone();
+        let proxy = match before_exec {
+            Some(hook) => ToolProxyServer::start_with_before_exec(server, hook).await?,
+            None => ToolProxyServer::start(server).await?,
+        };
         let bridge_url = proxy.bridge_url().to_string();
         let token = proxy.token_value().to_string();
         let shared_server = Arc::clone(proxy.server());
-        (Some(proxy), shared_server, bridge_url, token)
+        (Some(proxy), shared_server, bridge_url, token, session_hook)
     } else {
         let shared_server = ToolProxyServer::in_process(server);
-        (None, shared_server, String::new(), String::new())
+        (
+            None,
+            shared_server,
+            String::new(),
+            String::new(),
+            before_exec,
+        )
     };
 
     Ok(FfiCompressedSession {
@@ -169,6 +194,7 @@ async fn compressed_session_from_server(
         },
         server: shared_server,
         _proxy: proxy,
+        before_exec: in_process_before_exec,
     })
 }
 
@@ -187,6 +213,14 @@ pub async fn start_compressed_session_with_backend_configs(
     config: FfiCompressedSessionConfig,
     backends: Vec<crate::server::BackendServerConfig>,
 ) -> Result<FfiCompressedSession, Error> {
+    start_compressed_session_with_backend_configs_and_before_exec(config, backends, None).await
+}
+
+pub async fn start_compressed_session_with_backend_configs_and_before_exec(
+    config: FfiCompressedSessionConfig,
+    backends: Vec<crate::server::BackendServerConfig>,
+    before_exec: Option<BeforeExecHook>,
+) -> Result<FfiCompressedSession, Error> {
     let bridge = config.bridge;
     let server = CompressedServer::connect_multi_stdio(
         CompressedServerConfig {
@@ -201,7 +235,7 @@ pub async fn start_compressed_session_with_backend_configs(
         backends,
     )
     .await?;
-    compressed_session_from_server(server, bridge).await
+    compressed_session_from_server(server, bridge, before_exec).await
 }
 
 pub async fn start_compressed_session_from_mcp_config(
@@ -222,5 +256,88 @@ pub async fn start_compressed_session_from_mcp_config(
         mcp_config_json,
     )
     .await?;
-    compressed_session_from_server(server, bridge).await
+    compressed_session_from_server(server, bridge, None).await
+}
+
+#[cfg(test)]
+mod before_exec_tests {
+    use super::*;
+    use crate::ffi::dto::FfiCompressedSessionConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Invoke one tool through a session built with the given bridge setting and
+    /// report how many times the auth-refresh hook ran.
+    async fn refreshes_during_one_invocation(bridge: bool) -> usize {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("alpha_server.py");
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&refreshes);
+        let hook: BeforeExecHook = Arc::new(move || {
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let session = start_compressed_session_with_backend_configs_and_before_exec(
+            FfiCompressedSessionConfig {
+                compression_level: "max".to_string(),
+                server_name: Some("alpha".to_string()),
+                include_tools: Vec::new(),
+                exclude_tools: Vec::new(),
+                toonify: false,
+                transform_mode: None,
+                bridge,
+            },
+            vec![crate::server::BackendServerConfig::new(
+                "alpha",
+                python,
+                [fixture.to_string_lossy().into_owned()],
+            )],
+            Some(hook),
+        )
+        .await
+        .unwrap();
+
+        let output = session
+            .invoke(
+                "alpha_alpha_invoke_tool",
+                serde_json::json!({ "tool_name": "echo", "tool_input": { "message": "hi" } }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("alpha:hi"));
+        refreshes.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn in_process_invocations_run_the_auth_refresh_hook() {
+        assert_eq!(
+            refreshes_during_one_invocation(false).await,
+            1,
+            "a bridge-less session must still refresh auth before invoking, or generated \
+             in-process calls reuse stale credentials"
+        );
+    }
+
+    /// A bridge does not make the session hook redundant.
+    ///
+    /// `invoke()` dispatches in process whether or not a bridge is running, so
+    /// a session that hands its hook to the bridge and keeps none for itself
+    /// refreshes for HTTP callers and silently skips the refresh for SDK
+    /// callers on the very same session.
+    #[tokio::test]
+    async fn bridged_sessions_still_run_the_auth_refresh_hook_in_process() {
+        assert_eq!(
+            refreshes_during_one_invocation(true).await,
+            1,
+            "a bridged session must refresh auth for its own in-process invocations, \
+             not only for requests that arrive over the bridge"
+        );
+    }
 }

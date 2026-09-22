@@ -1,12 +1,23 @@
 mod common;
 
-use std::{io, net::Shutdown, net::TcpListener, process::Command, thread, time::Duration};
+use std::{
+    io,
+    net::Shutdown,
+    net::TcpListener,
+    process::Command,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use mcp_compressor_core::client_gen::cli::CliGenerator;
 use mcp_compressor_core::client_gen::python::PythonGenerator;
 use mcp_compressor_core::client_gen::typescript::TypeScriptGenerator;
 use mcp_compressor_core::client_gen::{ClientGenerator, GeneratorConfig};
-use mcp_compressor_core::proxy::{RunningToolProxy, ToolProxyServer};
+use mcp_compressor_core::proxy::{BeforeExecHook, RunningToolProxy, ToolProxyServer};
 use mcp_compressor_core::server::CompressedServer;
 
 async fn real_backend_tools() -> Vec<mcp_compressor_core::compression::engine::Tool> {
@@ -305,6 +316,53 @@ async fn generated_cli_script_invokes_real_proxy_and_backend() {
         String::from_utf8_lossy(&output.stdout).trim(),
         "alpha:hello"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_cli_request_runs_before_exec_hook_once() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let compressed = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls_for_request = Arc::clone(&hook_calls);
+    let before_exec: BeforeExecHook = Arc::new(move || {
+        let hook_calls = Arc::clone(&hook_calls_for_request);
+        Box::pin(async move {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    });
+    let proxy = ToolProxyServer::start_with_before_exec(compressed, before_exec)
+        .await
+        .unwrap();
+    let config = GeneratorConfig {
+        cli_name: "alpha".to_string(),
+        bridge_url: proxy.bridge_url().to_string(),
+        token: proxy.token_value().to_string(),
+        tools: real_backend_tools().await,
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    let paths = CliGenerator.generate(&config).unwrap();
+    let artifact_name = if cfg!(windows) { "alpha.cmd" } else { "alpha" };
+    let script = paths
+        .iter()
+        .find(|path| path.file_name().unwrap() == artifact_name)
+        .unwrap();
+
+    let output = generated_script_output(script, &["echo", "--message", "hooked"]);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

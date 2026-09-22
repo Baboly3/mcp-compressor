@@ -131,7 +131,7 @@ async function normalizeServersWithProviders(
       const backend: ProviderMaterializedBackend = await sdkObjectToNative(
         name,
         config as Record<string, unknown>,
-        { includeProvider: true },
+        { includeProvider: provider === undefined },
       );
       if (provider !== undefined) {
         backend.providerIndex = providers.length;
@@ -260,21 +260,7 @@ export class CompressorProxy {
   constructor(
     private readonly session: CompressedSession,
     private readonly defaultServer: string | null,
-    private readonly authProviders: AuthProvider[] = [],
   ) {}
-
-  private async refreshAuthProviders(): Promise<void> {
-    await Promise.all(
-      this.authProviders.map(async (provider, index) => {
-        const headers = await provider();
-        const materialized: Record<string, string> = {};
-        for (const [key, value] of Object.entries(headers)) {
-          materialized[key] = String(value);
-        }
-        this.session.updateAuthProviderHeaders(index, materialized);
-      }),
-    );
-  }
 
   info(): CompressedSessionInfo {
     return this.session.info();
@@ -321,7 +307,6 @@ export class CompressorProxy {
     if (this.closed) {
       throw new Error("Compressor proxy is closed");
     }
-    await this.refreshAuthProviders();
     const response = await fetch(`${this.bridgeUrl}/exec`, {
       method: "POST",
       headers: {
@@ -429,7 +414,7 @@ export class CompressorClient {
 
   async connect(): Promise<CompressorProxy> {
     if (this.session) {
-      return new CompressorProxy(this.session, this.defaultServer(), this.authProviders);
+      return new CompressorProxy(this.session, this.defaultServer());
     }
     const normalized = await normalizeServersWithProviders(this.options.servers);
     const config = {
@@ -451,7 +436,7 @@ export class CompressorClient {
               normalized.providers,
             )
           : await startCompressedSession(config, normalized.backends);
-    return new CompressorProxy(this.session, this.defaultServer(), this.authProviders);
+    return new CompressorProxy(this.session, this.defaultServer());
   }
 
   async close(): Promise<void> {

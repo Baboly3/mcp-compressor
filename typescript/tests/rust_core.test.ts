@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
+import { createServer } from "node:net";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { tmpdir } from "node:os";
 import { Bash } from "just-bash";
@@ -181,6 +182,66 @@ async function startRemoteAlphaUpstream(): Promise<{
   return { url, child };
 }
 
+async function startDirectRemoteAlphaUpstream(): Promise<{
+  url: string;
+  child: ChildProcessWithoutNullStreams;
+}> {
+  const port = await new Promise<number>((resolve, reject) => {
+    const reservation = createServer();
+    reservation.once("error", reject);
+    reservation.listen(0, "127.0.0.1", () => {
+      const address = reservation.address();
+      if (address === null || typeof address === "string") {
+        reject(new Error("failed to reserve a local HTTP port"));
+        return;
+      }
+      reservation.close((error) => (error ? reject(error) : resolve(address.port)));
+    });
+  });
+  const python = process.env.PYTHON ?? join(process.cwd(), "..", ".venv", "bin", "python");
+  const child = spawn(
+    python,
+    [
+      "-c",
+      `from alpha_server import mcp; mcp.run(transport="http", host="127.0.0.1", port=${port}, show_banner=False)`,
+    ],
+    {
+      cwd: join(process.cwd(), ".."),
+      env: {
+        ...process.env,
+        PYTHONPATH: dirname(fixturePath("alpha_server.py")),
+      },
+    },
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    let output = "";
+    const timeout = setTimeout(
+      () => reject(new Error(`timed out waiting for direct HTTP upstream\n${output}`)),
+      30_000,
+    );
+    const maybeResolve = (chunk: unknown) => {
+      output += String(chunk);
+      if (output.includes(`127.0.0.1:${port}`)) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    };
+    child.stdout.on("data", maybeResolve);
+    child.stderr.on("data", maybeResolve);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`direct HTTP upstream exited before ready: ${code}\n${output}`));
+    });
+  });
+
+  return { url: `http://127.0.0.1:${port}/mcp/`, child };
+}
+
 async function startRotatingAuthProxy(
   targetUrl: string,
   expectedStart = 1,
@@ -190,6 +251,7 @@ async function startRotatingAuthProxy(
   url: string;
   child: ChildProcessWithoutNullStreams;
   stderr: () => string;
+  tokenNumbers: () => number[];
 }> {
   const child = spawn(
     process.env.PYTHON ?? join(process.cwd(), "..", ".venv", "bin", "python"),
@@ -230,7 +292,13 @@ async function startRotatingAuthProxy(
     });
   });
 
-  return { url, child, stderr: () => stderr };
+  return {
+    url,
+    child,
+    stderr: () => stderr,
+    tokenNumbers: () =>
+      Array.from(stderr.matchAll(/AUTH_PROXY_TOKEN_NUMBER=(\d+)/g), (match) => Number(match[1])),
+  };
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -260,6 +328,47 @@ const sampleTool: ToolSpec = {
 };
 
 describe("Public TypeScript SDK workflow", () => {
+  it("does not keep the Node event loop alive after a provider session closes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mcp-compressor-eventloop-"));
+    const script = join(directory, "run.cjs");
+    const addon = join(process.cwd(), "native", "index.js").replace(/\\/g, "\\\\");
+    const python = (
+      process.env.PYTHON ?? join(process.cwd(), "..", ".venv", "bin", "python")
+    ).replace(/\\/g, "\\\\");
+    const fixture = fixturePath("alpha_server.py").replace(/\\/g, "\\\\");
+    writeFileSync(
+      script,
+      `const native = require("${addon}");
+(async () => {
+  const session = await native.startCompressedSessionWithProviderBackendsJson(
+    JSON.stringify({ compression_level: "max", server_name: "alpha", bridge: true }),
+    JSON.stringify([{ name: "alpha", command_or_url: "${python}", args: ["${fixture}"], provider_index: 0 }]),
+    JSON.stringify([{ Authorization: "Bearer initial" }]),
+    async () => JSON.stringify([{ Authorization: "Bearer refreshed" }]),
+  );
+  await session.close();
+})();
+`,
+      "utf8",
+    );
+
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(process.execPath, [script], { stdio: "ignore" });
+      // A strongly referenced threadsafe function keeps the loop alive, so the
+      // process would never exit on its own.
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("node process did not exit after the provider session closed"));
+      }, 20_000);
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+      child.on("error", reject);
+    });
+
+    expect(exitCode).toBe(0);
+  }, 40_000);
   it("supports schema lookup with multi-server disambiguation", async () => {
     const client = new CompressorClient({
       servers: {
@@ -324,6 +433,156 @@ describe("Public TypeScript SDK workflow", () => {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}\nAuth proxy stderr:\n${authProxy.stderr()}`,
       );
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("refreshes authProvider headers for generated and concurrent requests", async () => {
+    const upstream = await startDirectRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 10, 10);
+    const outputDir = mkdtempSync(join(tmpdir(), "mcp-compressor-generated-auth-"));
+    let calls = 0;
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async () => {
+            calls += 1;
+            return { Authorization: ["Bearer", `token-${calls}`].join(" ") };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const proxy = await client.connect();
+      try {
+        const direct = await proxy.invokeWrapper("remote_invoke_tool", {
+          tool_name: "echo",
+          tool_input: { message: "direct" },
+        });
+        expect(direct.text).toBe("alpha:direct");
+        const generatedClient = proxy.writeCodeClient({
+          language: "typescript",
+          outputDir,
+          name: "remote",
+        });
+        const generatedPath = generatedClient.files.find((path) => path.endsWith("remote.ts"));
+        expect(generatedPath).toBeDefined();
+        const generated = await import(generatedPath!);
+
+        await expect(generated.echo("generated")).resolves.toBe("alpha:generated");
+        await expect(
+          Promise.all([generated.echo("concurrent-one"), generated.echo("concurrent-two")]),
+        ).resolves.toEqual(
+          expect.arrayContaining(["alpha:concurrent-one", "alpha:concurrent-two"]),
+        );
+        expect(calls).toBe(5);
+        expect(authProxy.tokenNumbers().slice(-4)).toEqual([2, 3, 4, 5]);
+      } finally {
+        proxy.close();
+        await client.close();
+      }
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\nAuth proxy stderr:\n${authProxy.stderr()}`,
+      );
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("fails generated requests when authProvider rejects without exposing its error", async () => {
+    const upstream = await startDirectRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 10, 10);
+    const outputDir = mkdtempSync(join(tmpdir(), "mcp-compressor-generated-auth-error-"));
+    let calls = 0;
+    let rejectRefresh = false;
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async () => {
+            calls += 1;
+            if (rejectRefresh) {
+              throw new Error("secret-provider-detail");
+            }
+            return { Authorization: ["Bearer", "token-1"].join(" ") };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const proxy = await client.connect();
+      try {
+        const generatedClient = proxy.writeCodeClient({
+          language: "typescript",
+          outputDir,
+          name: "remote",
+        });
+        const generatedPath = generatedClient.files.find((path) => path.endsWith("remote.ts"));
+        expect(generatedPath).toBeDefined();
+        const generated = await import(generatedPath!);
+
+        rejectRefresh = true;
+        const invocation = generated.echo("rejected");
+        await expect(invocation).rejects.toThrow(/auth provider refresh failed/);
+        await expect(invocation).rejects.not.toThrow(/secret-provider-detail/);
+        expect(calls).toBe(2);
+      } finally {
+        proxy.close();
+        await client.close();
+      }
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("does not reuse stale authProvider headers when a refresh returns no headers", async () => {
+    const upstream = await startDirectRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 10, 10);
+    const outputDir = mkdtempSync(join(tmpdir(), "mcp-compressor-generated-empty-auth-"));
+    let calls = 0;
+    let returnEmptyHeaders = false;
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async (): Promise<Record<string, string>> => {
+            calls += 1;
+            return returnEmptyHeaders ? {} : { Authorization: ["Bearer", "token-1"].join(" ") };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const proxy = await client.connect();
+      try {
+        const generatedClient = proxy.writeCodeClient({
+          language: "typescript",
+          outputDir,
+          name: "remote",
+        });
+        const generatedPath = generatedClient.files.find((path) => path.endsWith("remote.ts"));
+        expect(generatedPath).toBeDefined();
+        const generated = await import(generatedPath!);
+
+        returnEmptyHeaders = true;
+        await expect(generated.echo("missing-auth")).rejects.toThrow();
+        expect(calls).toBe(2);
+      } finally {
+        proxy.close();
+        await client.close();
+      }
     } finally {
       await stopChild(authProxy.child);
       await stopChild(upstream.child);
