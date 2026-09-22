@@ -1248,6 +1248,7 @@ dependencies = [
  "libc",
  "open",
  "predicates",
+ "process-wrap",
  "rand 0.8.6",
  "reqwest",
  "rmcp",
@@ -1258,6 +1259,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "toon-format",
  "zip",
 ]
