@@ -23,6 +23,8 @@ import {
   type JsonConfigServerEntry,
 } from "../src/index.js";
 
+import { adoptNativeSession } from "../src/native_client.js";
+
 import {
   compressToolListing,
   formatToolSchemaResponse,
@@ -328,6 +330,190 @@ describe("Public TypeScript SDK workflow", () => {
       await stopChild(authProxy.child);
       await stopChild(upstream.child);
     }
+  });
+
+  it("shares one native session across concurrent connect calls", async () => {
+    const upstream = await startRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 20, 20);
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    let providerEntered!: () => void;
+    const firstProviderCall = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    let providerCalls = 0;
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async () => {
+            providerCalls += 1;
+            providerEntered();
+            await providerGate;
+            return { Authorization: "Bearer token-1" };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const firstConnection = client.connect();
+      const secondConnection = client.connect();
+      await firstProviderCall;
+      releaseProvider();
+
+      const [firstProxy, secondProxy] = await Promise.all([firstConnection, secondConnection]);
+      expect(firstProxy).toBe(secondProxy);
+      expect(providerCalls).toBe(2);
+      firstProxy.close();
+      await client.close();
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("closes a native session whose proxy adoption fails", () => {
+    let closes = 0;
+    const session = {
+      close(): void {
+        closes += 1;
+      },
+    };
+    const failure = new Error("adoption failed");
+
+    expect(() =>
+      adoptNativeSession(session, () => {
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(closes).toBe(1);
+  });
+
+  it("keeps a native session open once its proxy is adopted", () => {
+    let closes = 0;
+    const session = {
+      close(): void {
+        closes += 1;
+      },
+    };
+
+    const adopted = adoptNativeSession(session, () => "proxy");
+
+    expect(adopted).toBe("proxy");
+    expect(closes).toBe(0);
+  });
+  it("shares connection failures and permits a later retry", async () => {
+    const upstream = await startRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 20, 20);
+    const sharedFailure = new Error("shared connection failure");
+    let failProvider = true;
+    let providerCalls = 0;
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async () => {
+            providerCalls += 1;
+            if (failProvider) {
+              throw sharedFailure;
+            }
+            return { Authorization: "Bearer token-1" };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const failures = await Promise.allSettled([client.connect(), client.connect()]);
+      expect(failures).toEqual([
+        { status: "rejected", reason: sharedFailure },
+        { status: "rejected", reason: sharedFailure },
+      ]);
+      expect(providerCalls).toBe(1);
+
+      failProvider = false;
+      const proxy = await client.connect();
+      expect(providerCalls).toBe(3);
+      proxy.close();
+      await client.close();
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("closes a session that finishes connecting during close", async () => {
+    const upstream = await startRemoteAlphaUpstream();
+    const authProxy = await startRotatingAuthProxy(upstream.url, 1, 20, 20);
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    let providerEntered!: () => void;
+    const firstProviderCall = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          url: authProxy.url,
+          authProvider: async () => {
+            providerEntered();
+            await providerGate;
+            return { Authorization: "Bearer token-1" };
+          },
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    try {
+      const connection = client.connect();
+      await firstProviderCall;
+      const closing = client.close();
+      releaseProvider();
+      const proxy = await connection;
+      await closing;
+
+      await expect(
+        proxy.invokeWrapper("remote_invoke_tool", {
+          tool_name: "alpha_invoke_tool",
+          tool_input: { tool_name: "echo", tool_input: { message: "closed" } },
+        }),
+      ).rejects.toThrow(/closed/);
+
+      const reconnected = await client.connect();
+      expect(reconnected).not.toBe(proxy);
+      reconnected.close();
+      await client.close();
+    } finally {
+      await stopChild(authProxy.child);
+      await stopChild(upstream.child);
+    }
+  });
+
+  it("reconnects after its proxy is closed directly", async () => {
+    const client = new CompressorClient({
+      servers: {
+        remote: {
+          command: process.env.PYTHON ?? join(process.cwd(), "..", ".venv", "bin", "python"),
+          args: [fixturePath("alpha_server.py")],
+        },
+      },
+      compressionLevel: "max",
+    });
+
+    const firstProxy = await client.connect();
+    firstProxy.close();
+
+    const reconnected = await client.connect();
+    expect(reconnected).not.toBe(firstProxy);
+    await client.close();
   });
 
   it("matches the documented CompressorClient quickstart", async () => {

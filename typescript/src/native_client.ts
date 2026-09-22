@@ -254,6 +254,31 @@ function transformMode(mode: NativeCompressorMode): string | null {
   return mode;
 }
 
+const proxyCloseCallbacks = new WeakMap<CompressorProxy, () => void>();
+
+/**
+ * Hand a freshly started native session to `build`, closing the session if
+ * `build` throws.
+ *
+ * A started session owns backend processes and sockets that are only reachable
+ * through the object `build` returns. Without this the session would leak for
+ * the lifetime of the host process whenever adoption failed.
+ *
+ * Internal; not part of the public package surface.
+ */
+export function adoptNativeSession<T>(session: { close(): void }, build: () => T): T {
+  try {
+    return build();
+  } catch (error) {
+    try {
+      session.close();
+    } catch {
+      // Closing a session that never became reachable is best effort.
+    }
+    throw error;
+  }
+}
+
 export class CompressorProxy {
   private closed = false;
 
@@ -365,8 +390,17 @@ export class CompressorProxy {
   }
 
   close(): void {
+    if (this.closed) {
+      return;
+    }
     this.closed = true;
-    this.session.close();
+    try {
+      this.session.close();
+    } finally {
+      const onClose = proxyCloseCallbacks.get(this);
+      proxyCloseCallbacks.delete(this);
+      onClose?.();
+    }
   }
 
   toExecutableTools(): Record<string, ExecutableTool> {
@@ -420,6 +454,9 @@ export class CompressorProxy {
 
 export class CompressorClient {
   private session: CompressedSession | null = null;
+  private proxy: CompressorProxy | null = null;
+  private connectPromise: Promise<CompressorProxy> | null = null;
+  private closingPromise: Promise<void> | null = null;
   private readonly mode: NativeCompressorMode;
   private authProviders: AuthProvider[] = [];
 
@@ -428,9 +465,31 @@ export class CompressorClient {
   }
 
   async connect(): Promise<CompressorProxy> {
-    if (this.session) {
-      return new CompressorProxy(this.session, this.defaultServer(), this.authProviders);
+    if (this.closingPromise) {
+      try {
+        await this.closingPromise;
+      } catch {
+        // The close caller receives the error; cleared state can reconnect independently.
+      }
     }
+    if (this.proxy) {
+      return this.proxy;
+    }
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+    const connection = this.startConnection();
+    this.connectPromise = connection;
+    try {
+      return await connection;
+    } finally {
+      if (this.connectPromise === connection) {
+        this.connectPromise = null;
+      }
+    }
+  }
+
+  private async startConnection(): Promise<CompressorProxy> {
     const normalized = await normalizeServersWithProviders(this.options.servers);
     const config = {
       compressionLevel: this.options.compressionLevel ?? "medium",
@@ -441,7 +500,7 @@ export class CompressorClient {
       transformMode: transformMode(this.mode),
     };
     this.authProviders = typeof normalized === "string" ? [] : normalized.providers;
-    this.session =
+    const session =
       typeof normalized === "string"
         ? await startCompressedSessionFromMcpConfig(config, normalized)
         : normalized.providers.length > 0
@@ -451,12 +510,50 @@ export class CompressorClient {
               normalized.providers,
             )
           : await startCompressedSession(config, normalized.backends);
-    return new CompressorProxy(this.session, this.defaultServer(), this.authProviders);
+    const proxy = adoptNativeSession(session, () => {
+      const adopted = new CompressorProxy(session, this.defaultServer(), this.authProviders);
+      proxyCloseCallbacks.set(adopted, () => {
+        if (this.proxy === adopted) {
+          this.proxy = null;
+          this.session = null;
+        }
+      });
+      return adopted;
+    });
+    this.session = session;
+    this.proxy = proxy;
+    return proxy;
   }
 
-  async close(): Promise<void> {
-    this.session?.close();
-    this.session = null;
+  close(): Promise<void> {
+    if (!this.closingPromise) {
+      const closing = this.closeCurrentConnection();
+      let trackedClosing: Promise<void>;
+      trackedClosing = closing.finally(() => {
+        if (this.closingPromise === trackedClosing) {
+          this.closingPromise = null;
+        }
+      });
+      this.closingPromise = trackedClosing;
+    }
+    return this.closingPromise;
+  }
+
+  private async closeCurrentConnection(): Promise<void> {
+    try {
+      await this.connectPromise;
+    } catch {
+      // A failed connection has no native session to release.
+    }
+    const proxy = this.proxy;
+    try {
+      proxy?.close();
+    } finally {
+      if (this.proxy === proxy) {
+        this.proxy = null;
+        this.session = null;
+      }
+    }
   }
 
   private defaultServer(): string | null {
