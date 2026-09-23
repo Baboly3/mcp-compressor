@@ -17,7 +17,7 @@ mcp-compressor --help
 | `--multi-server <name=command ...>` | Direct multi-server CLI configuration (repeatable). Format: `name=command [args...]`. |
 | `--include-tools <a,b>` | Include only selected backend tools (comma-separated). |
 | `--exclude-tools <a,b>` | Exclude selected backend tools (comma-separated). |
-| `--toonify` | Convert JSON text outputs to TOON (Token-Oriented Object Notation) where applicable. |
+| `--toonify` | Convert JSON, CSV and YAML text outputs to TOON (Token-Oriented Object Notation) where applicable. |
 | `--transport <stdio\|streamable-http>` | Frontend MCP transport. Default: `stdio`. |
 | `--port <port>` | Port for streamable HTTP frontend. Use `0` for OS-selected. Default: `8000`. |
 | `--cli-mode` | Generate a shell CLI and run a local proxy. |

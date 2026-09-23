@@ -33,6 +33,8 @@ tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 open = "5.3"
 toon-format = { version = "0.4.5", default-features = false }
+csv = "1"
+yaml_serde = "0.10"
 [dev-dependencies]
 # async test runtime and macros (#[tokio::test])
 tokio    = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

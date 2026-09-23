@@ -58,9 +58,5 @@ fn render_client_artifacts_from_config(
 }
 
 pub fn maybe_toonify_output(output: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
-        return output.to_string();
-    };
-    toon_format::encode(&value, &toon_format::EncodeOptions::default())
-        .unwrap_or_else(|_| output.to_string())
+    crate::server::compressed::toonify_output(true, output)
 }
