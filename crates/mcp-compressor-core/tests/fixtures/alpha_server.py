@@ -41,6 +41,18 @@ def summarize_payload(items: list[str], metadata: dict[str, Any]) -> dict[str, A
 
 
 @mcp.tool
+def csv_rows() -> ToolResult:
+    """Return a CSV table in a text block for toonify contract tests."""
+    return ToolResult(content=[TextContent(type="text", text="id,name\n1,alpha\n2,beta\n")])
+
+
+@mcp.tool
+def yaml_doc() -> ToolResult:
+    """Return a YAML document in a text block for toonify contract tests."""
+    return ToolResult(content=[TextContent(type="text", text="name: alpha\nports:\n  - 80\n  - 443\n")])
+
+
+@mcp.tool
 def json_rows() -> ToolResult:
     """Return a JSON table in an annotated text block for toonify contract tests."""
     return ToolResult(

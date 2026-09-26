@@ -113,7 +113,7 @@ function buildProgram(options: { exitOverride?: boolean } = {}): Command {
         "tool name specifications (only A-Z, a-z, 0-9, _, -, .).",
     )
     .option("-l, --log-level <level>", "The logging level.", "error")
-    .option("--toonify", "Convert JSON tool responses to TOON format automatically.")
+    .option("--toonify", "Convert JSON, CSV and YAML tool responses to TOON format automatically.")
     .option(
       "--cli-mode",
       "Start in CLI mode: expose a single help MCP tool, start a local HTTP\n" +
