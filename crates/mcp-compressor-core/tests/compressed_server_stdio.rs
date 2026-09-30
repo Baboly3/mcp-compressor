@@ -1,28 +1,28 @@
 mod common;
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::State,
     http::{Response, StatusCode},
     response::IntoResponse,
     routing::post,
-    Json, Router,
 };
 use mcp_compressor_core::{
-    server::{
-        registration::FrontendServer, BackendAuthMode, BackendServerConfig, CompressedServer,
-    },
     Error,
+    server::{
+        BackendAuthMode, BackendServerConfig, CompressedServer, registration::FrontendServer,
+    },
 };
 use rmcp::{
-    model::{CallToolRequestParams, Meta},
     ServiceExt,
+    model::{CallToolRequestParams, Meta},
 };
 use serde_json::json;
 use tokio::io::AsyncReadExt;
@@ -92,17 +92,16 @@ async fn hanging_http_mcp(
 }
 
 fn assert_backend_timeout(error: &Error, backend: &str, operation: &str) {
-    let Error::BackendTimeout {
-        backend: actual_backend,
-        operation: actual_operation,
-        timeout,
-    } = error
-    else {
-        panic!("expected a typed backend timeout, got: {error}");
+    let Error::Config(message) = error else {
+        panic!("expected a backend timeout configuration error, got: {error}");
     };
-    assert_eq!(actual_backend, backend);
-    assert_eq!(actual_operation, operation);
-    assert_eq!(*timeout, Duration::from_millis(500));
+    assert_eq!(
+        message,
+        &format!(
+            "backend {backend:?} timed out during {operation} after {:?}",
+            Duration::from_millis(500)
+        )
+    );
 }
 
 #[cfg(unix)]
@@ -403,12 +402,16 @@ async fn single_stdio_backend_schema_listing_invocation_resources_and_prompts_wo
     assert_eq!(add, "7");
 
     let resources = server.list_resources().await.unwrap();
-    assert!(resources
-        .iter()
-        .any(|uri| uri == "fixture://alpha-resource"));
-    assert!(resources
-        .iter()
-        .any(|uri| uri == "compressor://alpha/uncompressed-tools"));
+    assert!(
+        resources
+            .iter()
+            .any(|uri| uri == "fixture://alpha-resource")
+    );
+    assert!(
+        resources
+            .iter()
+            .any(|uri| uri == "compressor://alpha/uncompressed-tools")
+    );
     assert_eq!(
         server
             .read_resource("fixture://alpha-resource")
@@ -702,6 +705,52 @@ async fn configured_timeout_bounds_tool_discovery() {
     .await;
     let error = result.unwrap_err();
     assert_backend_timeout(&error, "hanging", "list tools");
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_timeout_bounds_resource_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let ready_file = temp.path().join("ready");
+    let timeout = Duration::from_millis(500);
+    let backend = common::backend("hanging", "hanging_server.py")
+        .with_env([
+            ("HANG_OPERATION", "resource-discovery"),
+            ("READY_FILE", ready_file.to_str().unwrap()),
+        ])
+        .with_timeout(timeout);
+
+    let result = common::expire_after_fixture_ready(
+        CompressedServer::connect_stdio(common::max_config(Some("hanging")), backend),
+        &ready_file,
+        "resource-discovery",
+        timeout,
+    )
+    .await;
+    let error = result.unwrap_err();
+    assert_backend_timeout(&error, "hanging", "list resources");
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_timeout_bounds_prompt_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let ready_file = temp.path().join("ready");
+    let timeout = Duration::from_millis(500);
+    let backend = common::backend("hanging", "hanging_server.py")
+        .with_env([
+            ("HANG_OPERATION", "prompt-discovery"),
+            ("READY_FILE", ready_file.to_str().unwrap()),
+        ])
+        .with_timeout(timeout);
+
+    let result = common::expire_after_fixture_ready(
+        CompressedServer::connect_stdio(common::max_config(Some("hanging")), backend),
+        &ready_file,
+        "prompt-discovery",
+        timeout,
+    )
+    .await;
+    let error = result.unwrap_err();
+    assert_backend_timeout(&error, "hanging", "list prompts");
 }
 
 #[tokio::test(start_paused = true)]

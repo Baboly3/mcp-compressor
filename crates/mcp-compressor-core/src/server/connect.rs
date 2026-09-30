@@ -24,14 +24,14 @@ use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 
+use crate::Error;
 use crate::compression::engine::Tool;
 use crate::oauth::{
-    oauth_store_dir, open_authorization_url, remember_oauth_store, BrowserOpenStatus,
-    FileCredentialStore, FileStateStore, OAuthCallbackListener,
+    BrowserOpenStatus, FileCredentialStore, FileStateStore, OAuthCallbackListener, oauth_store_dir,
+    open_authorization_url, remember_oauth_store,
 };
-use crate::server::backend::{backend_http_headers, BackendServerConfig, BackendTransport};
+use crate::server::backend::{BackendServerConfig, BackendTransport, backend_http_headers};
 use crate::server::dynamic_http_client::DynamicAuthHttpClient;
-use crate::Error;
 
 #[derive(Debug)]
 pub(crate) struct ConnectedBackend {
@@ -88,7 +88,7 @@ pub(crate) async fn connect_backend(
         Ok(tools) => tools,
         Err(error) => {
             cleanup_after_discovery_failure(&client, process_id).await;
-            return Err(error);
+            return Err(error.into());
         }
     };
     let mut tools = rmcp_tools.into_iter().map(convert_tool).collect::<Vec<_>>();
@@ -108,10 +108,10 @@ pub(crate) async fn connect_backend(
             .into_iter()
             .map(|resource| resource.raw.uri)
             .collect::<Vec<_>>(),
-        Err(Error::Config(_)) => Vec::new(),
+        Err(error) if optional_discovery_error_is_ignorable(&error) => Vec::new(),
         Err(error) => {
             cleanup_after_discovery_failure(&client, process_id).await;
-            return Err(error);
+            return Err(error.into());
         }
     };
     let prompts = match backend_operation(timeout, &backend_name, "list prompts", async {
@@ -120,10 +120,10 @@ pub(crate) async fn connect_backend(
     .await
     {
         Ok(prompts) => prompts,
-        Err(Error::Config(_)) => Vec::new(),
+        Err(error) if optional_discovery_error_is_ignorable(&error) => Vec::new(),
         Err(error) => {
             cleanup_after_discovery_failure(&client, process_id).await;
-            return Err(error);
+            return Err(error.into());
         }
     };
 
@@ -189,26 +189,78 @@ pub(crate) async fn backend_operation<T, F>(
     backend: &str,
     operation: &str,
     future: F,
-) -> Result<T, Error>
+) -> Result<T, BackendOperationError>
 where
     F: Future<Output = Result<T, Error>>,
 {
     match timeout {
         Some(timeout) => {
-            let result = tokio::time::timeout(timeout, future)
-                .await
-                .map_err(|_| timeout_error(backend, operation, timeout))?;
-            result
+            let result = tokio::time::timeout(timeout, future).await.map_err(|_| {
+                BackendOperationError::Timeout {
+                    backend: backend.to_string(),
+                    operation: operation.to_string(),
+                    timeout,
+                }
+            })?;
+            result.map_err(BackendOperationError::Failure)
         }
-        None => future.await,
+        None => future.await.map_err(BackendOperationError::Failure),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum BackendOperationError {
+    Failure(Error),
+    Timeout {
+        backend: String,
+        operation: String,
+        timeout: Duration,
+    },
+}
+
+impl From<BackendOperationError> for Error {
+    fn from(error: BackendOperationError) -> Self {
+        match error {
+            BackendOperationError::Failure(error) => error,
+            BackendOperationError::Timeout {
+                backend,
+                operation,
+                timeout,
+            } => Error::Config(format!(
+                "backend {backend:?} timed out during {operation} after {timeout:?}"
+            )),
+        }
     }
 }
 
 pub(crate) fn timeout_error(backend: &str, operation: &str, timeout: Duration) -> Error {
-    Error::BackendTimeout {
-        backend: backend.to_string(),
-        operation: operation.to_string(),
-        timeout,
+    Error::Config(format!(
+        "backend {backend:?} timed out during {operation} after {timeout:?}"
+    ))
+}
+
+fn optional_discovery_error_is_ignorable(error: &BackendOperationError) -> bool {
+    matches!(error, BackendOperationError::Failure(Error::Config(_)))
+}
+
+#[cfg(test)]
+mod optional_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn optional_discovery_ignores_remote_config_errors_but_not_timeouts() {
+        let remote_error = BackendOperationError::Failure(Error::Config(
+            "backend timed out during cache refresh".to_string(),
+        ));
+
+        assert!(optional_discovery_error_is_ignorable(&remote_error));
+        assert!(!optional_discovery_error_is_ignorable(
+            &BackendOperationError::Timeout {
+                backend: "backend".to_string(),
+                operation: "list resources".to_string(),
+                timeout: Duration::from_millis(500),
+            },
+        ));
     }
 }
 
@@ -552,21 +604,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(server
-            .join()
-            .unwrap()
-            .to_ascii_lowercase()
-            .contains("x-tenant: tenant-123"));
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("x-tenant: tenant-123")
+        );
     }
 
     #[tokio::test]
     async fn oauth_backend_validates_headers_before_authorization() {
-        let backend = BackendServerConfig::new(
-            "remote",
-            "http://127.0.0.1:0/mcp",
-            [] as [&str; 0],
-        )
-        .with_headers([("invalid header", "value")]);
+        let backend = BackendServerConfig::new("remote", "http://127.0.0.1:0/mcp", [] as [&str; 0])
+            .with_headers([("invalid header", "value")]);
 
         let error = connect_oauth_streamable_http_backend(&backend)
             .await

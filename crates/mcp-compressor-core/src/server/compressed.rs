@@ -19,12 +19,12 @@ pub(crate) const INVOKE_TOOL_INPUT_SCHEMA_DESCRIPTION: &str = concat!(
     "Use get_tool_schema for the selected tool_name before invoking if required fields are unknown."
 );
 
-use crate::compression::engine::{CompressionEngine, Tool};
+use crate::Error;
 use crate::compression::CompressionLevel;
+use crate::compression::engine::{CompressionEngine, Tool};
 use crate::config::topology::MCPConfig;
 use crate::server::backend::BackendServerConfig;
-use crate::server::connect::{backend_operation, connect_backend, timeout_error, ConnectedBackend};
-use crate::Error;
+use crate::server::connect::{ConnectedBackend, backend_operation, connect_backend, timeout_error};
 
 /// Frontend tool-surface mode exposed by the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,7 +366,7 @@ impl CompressedServer {
             _ => {
                 return Err(Error::Config(
                     "unexpected read resource response".to_string(),
-                ))
+                ));
             }
         };
         Ok(resource_contents_to_string(result.contents))
@@ -650,9 +650,11 @@ mod request_timeout_tests {
                 ClientRequest::PingRequest(Default::default()),
             );
             tokio::pin!(request);
-            assert!(tokio::task::unconstrained(request.as_mut())
-                .now_or_never()
-                .is_none());
+            assert!(
+                tokio::task::unconstrained(request.as_mut())
+                    .now_or_never()
+                    .is_none()
+            );
             if matches!(queue_state, QueueState::FullAfterSubmission) {
                 fill_peer_queue(&backend);
             }
@@ -662,7 +664,7 @@ mod request_timeout_tests {
         let error = result
             .expect("request or cancellation ignored the configured deadline")
             .unwrap_err();
-        assert!(matches!(error, Error::BackendTimeout { .. }), "{error}");
+        assert!(matches!(error, Error::Config(_)), "{error}");
     }
 }
 

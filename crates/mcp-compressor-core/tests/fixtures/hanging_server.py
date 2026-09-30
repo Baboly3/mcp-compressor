@@ -42,6 +42,26 @@ class HangingDiscoveryMiddleware(Middleware):
             await asyncio.Event().wait()
         return await call_next(context)
 
+    async def on_list_resources(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: Any,
+    ) -> Any:
+        if mode == "resource-discovery":
+            ready("resource-discovery")
+            await asyncio.Event().wait()
+        return await call_next(context)
+
+    async def on_list_prompts(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: Any,
+    ) -> Any:
+        if mode == "prompt-discovery":
+            ready("prompt-discovery")
+            await asyncio.Event().wait()
+        return await call_next(context)
+
 
 mcp.add_middleware(HangingDiscoveryMiddleware())
 
