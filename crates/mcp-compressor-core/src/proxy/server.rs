@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,9 +18,9 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use crate::Error;
 use crate::proxy::auth::SessionToken;
 use crate::server::compressed::CompressedServer;
-use crate::Error;
 
 #[derive(Debug)]
 pub struct ToolProxyServer;
@@ -45,7 +45,7 @@ struct ProxyState {
 
 struct BeforeExec {
     hook: BeforeExecHook,
-    request_lock: Mutex<()>,
+    request_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,24 +71,41 @@ impl ToolProxyServer {
         server: CompressedServer,
         before_exec: BeforeExecHook,
     ) -> Result<RunningToolProxy, Error> {
-        Self::start_inner(server, Some(before_exec)).await
+        Self::start_inner(
+            server,
+            Some(Arc::new(BeforeExec {
+                hook: before_exec,
+                request_lock: Arc::new(Mutex::new(())),
+            })),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_before_exec_lock(
+        server: CompressedServer,
+        before_exec: BeforeExecHook,
+        request_lock: Arc<Mutex<()>>,
+    ) -> Result<RunningToolProxy, Error> {
+        Self::start_inner(
+            server,
+            Some(Arc::new(BeforeExec {
+                hook: before_exec,
+                request_lock,
+            })),
+        )
+        .await
     }
 
     async fn start_inner(
         server: CompressedServer,
-        before_exec: Option<BeforeExecHook>,
+        before_exec: Option<Arc<BeforeExec>>,
     ) -> Result<RunningToolProxy, Error> {
         let token = SessionToken::generate();
         let server = Arc::new(server);
         let state = ProxyState {
             server: Arc::clone(&server),
             token: token.clone(),
-            before_exec: before_exec.map(|hook| {
-                Arc::new(BeforeExec {
-                    hook,
-                    request_lock: Mutex::new(()),
-                })
-            }),
+            before_exec,
         };
 
         let app = Router::new()
