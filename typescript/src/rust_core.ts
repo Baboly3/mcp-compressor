@@ -166,7 +166,12 @@ export class CompressedSession {
   }
 
   close(): Promise<void> {
-    return (this.closing ??= this.nativeSession.close());
+    if (this.closing) {
+      return this.closing;
+    }
+    const closing = this.nativeSession.close();
+    this.closing = closing.catch(() => {});
+    return closing;
   }
 
   updateAuthProviderHeaders(providerIndex: number, headers: Record<string, string>): void {

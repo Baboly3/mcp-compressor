@@ -38,6 +38,7 @@ import {
   parseToolArgv,
   type ToolSpec,
 } from "../src/rust_core.js";
+import type { NativeCompressedSession } from "../src/native.js";
 
 function invokeProxy(
   bridgeUrl: string,
@@ -127,6 +128,22 @@ function alphaBackend() {
     name: "alpha",
     commandOrUrl: process.env.PYTHON ?? join(process.cwd(), "..", ".venv", "bin", "python"),
     args: [fixturePath("alpha_server.py")],
+  };
+}
+
+function nativeSession(close: () => Promise<void>): NativeCompressedSession {
+  return {
+    infoJson: () =>
+      JSON.stringify({
+        bridge_url: "",
+        token: "",
+        frontend_tools: [],
+        backend_tools: [],
+        backend_tools_by_server: [],
+        just_bash_providers: [],
+      }),
+    close,
+    updateAuthProviderHeadersJson: () => {},
   };
 }
 
@@ -1614,6 +1631,37 @@ describe("Rust native core wrapper", () => {
       }
       rmSync(configHome, { recursive: true, force: true });
     }
+  });
+
+  it("treats a repeated close as a no-op after native shutdown fails", async () => {
+    const close = vi.fn().mockRejectedValueOnce(new Error("shutdown failed"));
+    const session = new CompressedSession(nativeSession(close));
+
+    await expect(session.close()).rejects.toThrow("shutdown failed");
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not log a proxy shutdown error", async () => {
+    const close = vi.fn().mockRejectedValueOnce(new Error("shutdown failed"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const proxy = new CompressorProxy(new CompressedSession(nativeSession(close)), null);
+
+    try {
+      await expect(proxy.close()).rejects.toThrow("shutdown failed");
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("treats a repeated proxy close as a no-op after native shutdown fails", async () => {
+    const close = vi.fn().mockRejectedValueOnce(new Error("shutdown failed"));
+    const proxy = new CompressorProxy(new CompressedSession(nativeSession(close)), null);
+
+    await expect(proxy.close()).rejects.toThrow("shutdown failed");
+    await expect(proxy.close()).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("parses MCP config through the native addon", () => {

@@ -370,10 +370,8 @@ export class CompressorProxy {
       return this.closing;
     }
     this.closed = true;
-    const closing = (this.closing = this.session.close());
-    // Callers that do not await must not turn a shutdown failure into an
-    // unhandled rejection, but callers that do await still see the error.
-    closing.catch((error) => console.error(`Failed to close compressor proxy: ${String(error)}`));
+    const closing = this.session.close();
+    this.closing = closing.catch(() => {});
     return closing;
   }
 
