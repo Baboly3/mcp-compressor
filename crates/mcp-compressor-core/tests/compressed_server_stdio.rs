@@ -467,6 +467,25 @@ async fn mcp_frontend_toonifies_json_text_results() {
     assert!(text.contains("1,alpha"), "expected TOON rows, got {text}");
     assert_eq!(result["content"][0]["annotations"]["priority"], json!(0.75));
 
+    // CSV text blocks take the same route, so one more call covers them.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("alpha_invoke_tool").with_arguments(
+                json!({"tool_name": "csv_rows", "tool_input": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let result = serde_json::to_value(result).unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[2]{id,name}:"),
+        "expected TOON table, got {text}"
+    );
+
     client.close().await.unwrap();
     server_task.await.unwrap();
 }

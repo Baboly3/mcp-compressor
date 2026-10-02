@@ -143,3 +143,29 @@ async fn toonify_uses_official_toon_encoder_for_json_outputs() {
     assert!(output.contains("server: alpha"));
     assert!(output.contains("values"));
 }
+
+#[tokio::test]
+async fn toonify_converts_csv_and_yaml_outputs() {
+    let config = common::toonify_config(Some("alpha"));
+    let server =
+        CompressedServer::connect_stdio(config, common::backend("alpha", "alpha_server.py"))
+            .await
+            .unwrap();
+
+    let csv = server
+        .invoke_tool("alpha_invoke_tool", "csv_rows", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        csv.starts_with("[2]{id,name}:"),
+        "expected TOON table, got {csv}"
+    );
+    let yaml = server
+        .invoke_tool("alpha_invoke_tool", "yaml_doc", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        yaml.contains("ports[2]: 80,443"),
+        "expected TOON mapping, got {yaml}"
+    );
+}
