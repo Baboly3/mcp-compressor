@@ -68,7 +68,7 @@ pub struct CliOptions {
     #[arg(long, value_delimiter = ',')]
     pub exclude_tools: Vec<String>,
 
-    /// Convert JSON text outputs to TOON where possible.
+    /// Convert JSON, CSV and YAML text outputs to TOON where possible.
     #[arg(long, action = ArgAction::SetTrue)]
     pub toonify: bool,
 

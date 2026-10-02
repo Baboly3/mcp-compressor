@@ -141,7 +141,7 @@ Filters are applied before compression: the compressed frontend only sees the fi
 
 ## TOON output
 
-TOON (Token-Oriented Object Notation) is a token-efficient alternative representation for JSON-structured data. When enabled, the proxy converts JSON text in tool outputs to TOON format before returning results to the client. TOON encodes the same information as JSON using fewer tokens, which reduces the context consumed by large tool responses.
+TOON (Token-Oriented Object Notation) is a token-efficient alternative representation for JSON-structured data. When enabled, the proxy converts JSON, CSV and YAML text in tool outputs to TOON format before returning results to the client. TOON encodes the same information as JSON using fewer tokens, which reduces the context consumed by large tool responses.
 
 === "CLI"
 
@@ -176,4 +176,4 @@ TOON (Token-Oriented Object Notation) is a token-efficient alternative represent
     ```
 
 !!! note
-    TOON output is most effective for tool responses that return deeply nested JSON objects. Plain text responses pass through unchanged.
+    TOON output is most effective for tool responses that return deeply nested JSON objects. Plain text responses pass through unchanged. CSV is recognised by a header row of two or more named columns followed by at least one row of the same width; YAML by a mapping or list of mappings with nested values. Flat `key: value` text, bullet lists and text that merely contains commas or colons are left as is.

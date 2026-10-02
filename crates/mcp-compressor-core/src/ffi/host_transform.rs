@@ -612,4 +612,14 @@ List accessible resources for the user."
         let value = json!({"content":[{"type":"text","text":"{\"ok\":true}"}]});
         assert_eq!(normalize_host_tool_result(value, false), "{\"ok\":true}");
     }
+
+    /// The napi path shares the core conversion, so CSV must toonify here too.
+    #[test]
+    fn toonifies_csv_text_content_results() {
+        let value = json!({"content":[{"type":"text","text":"id,name\n1,alpha\n"}]});
+        assert_eq!(
+            normalize_host_tool_result(value, true),
+            "[1]{id,name}:\n  1,alpha"
+        );
+    }
 }
