@@ -781,23 +781,167 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn toonify_output(toonify: bool, output: &str) -> String {
+pub(crate) fn toonify_output(toonify: bool, output: &str) -> String {
     if !toonify {
         return output.to_string();
     }
-    let Ok(value) = serde_json::from_str::<Value>(output) else {
+    let Some(value) = parse_structured_output(output) else {
         return output.to_string();
     };
     toon_format::encode(&value, &toon_format::EncodeOptions::default())
         .unwrap_or_else(|_| output.to_string())
 }
 
+/// YAML goes before CSV, or `tags: a,b` would read as a two-column table.
+fn parse_structured_output(output: &str) -> Option<Value> {
+    let text = output.strip_prefix('\u{feff}').unwrap_or(output);
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    let yaml = yaml_candidate(text)
+        .then(|| yaml_serde::from_str(text).ok())
+        .flatten()
+        .and_then(yaml_to_json);
+    match yaml {
+        Some(value @ (Value::Object(_) | Value::Array(_))) => {
+            yaml_is_structured(&value).then_some(value)
+        }
+        _ => csv_to_json(text),
+    }
+}
+
+/// libyaml copies every alias (a few KB of anchors can grow to gigabytes) and
+/// drops comments (`tags: #ai` becomes null), so such text stays verbatim.
+fn yaml_candidate(text: &str) -> bool {
+    !(text.contains('&') && text.contains('*'))
+        && !text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with('#') || line.contains(" #") || line.contains("\t#")
+        })
+}
+
+/// Going through `yaml_serde::Value` rejects duplicate keys, which a
+/// `serde_json::Value` target would silently collapse to the last entry.
+fn yaml_to_json(value: yaml_serde::Value) -> Option<Value> {
+    use yaml_serde::Value as Yaml;
+    Some(match value {
+        Yaml::Null => Value::Null,
+        Yaml::Bool(flag) => Value::Bool(flag),
+        Yaml::Number(number) => serde_json::from_str(&number.to_string()).ok()?,
+        Yaml::String(text) => Value::String(text),
+        Yaml::Sequence(items) => {
+            Value::Array(items.into_iter().map(yaml_to_json).collect::<Option<_>>()?)
+        }
+        Yaml::Mapping(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| match key {
+                    Yaml::String(key) => Some((key, yaml_to_json(value)?)),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+        ),
+        Yaml::Tagged(_) => return None,
+    })
+}
+
+/// Prose like "Found 3 files:\n- a.txt" is valid YAML too, and a flat
+/// `key: value` block reads the same in TOON, so only real records convert.
+fn yaml_is_structured(value: &Value) -> bool {
+    fn is_record(map: &serde_json::Map<String, Value>) -> bool {
+        map.len() >= 2 && map.keys().all(|key| !key.contains(char::is_whitespace))
+    }
+    fn has_record(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => is_record(map) || map.values().any(has_record),
+            Value::Array(items) => items.iter().any(has_record),
+            _ => false,
+        }
+    }
+    match value {
+        Value::Object(map) => {
+            map.keys().all(|key| !key.contains(char::is_whitespace))
+                && map.values().any(|value| match value {
+                    Value::Object(map) => !map.is_empty(),
+                    Value::Array(items) => !items.is_empty(),
+                    _ => false,
+                })
+                && has_record(value)
+        }
+        Value::Array(items) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.as_object().is_some_and(is_record))
+        }
+        _ => false,
+    }
+}
+
+/// Headers must look like column names, so logs, `KEY=a,b` lines and prose
+/// stay out; rows of a different width fail the non-flexible reader.
+/// "Hello,world\nFoo,bar" still converts.
+fn csv_to_json(text: &str) -> Option<Value> {
+    let mut reader = csv::Reader::from_reader(text.as_bytes());
+    let headers = reader.headers().ok()?.clone();
+    let named = headers.len() >= 2
+        && headers.iter().all(|cell| {
+            cell.trim() == cell
+                && cell.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && cell
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ' '))
+        })
+        && headers
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == headers.len();
+    if !named {
+        return None;
+    }
+    let rows = reader
+        .records()
+        .map(|record| {
+            let record = record.ok()?;
+            Some(Value::Object(
+                headers
+                    .iter()
+                    .map(String::from)
+                    .zip(record.iter().map(csv_cell))
+                    .collect(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!rows.is_empty()).then_some(Value::Array(rows))
+}
+
+/// Typed only when it prints back as the same text, so "007" and "3.10" survive.
+fn csv_cell(cell: &str) -> Value {
+    let int = cell
+        .parse::<i64>()
+        .ok()
+        .filter(|int| int.to_string() == cell);
+    let float = cell
+        .parse::<f64>()
+        .ok()
+        .filter(|float| cell.contains('.') && float.to_string() == cell);
+    match cell {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => int
+            .map(Value::from)
+            .or_else(|| float.map(Value::from))
+            .unwrap_or_else(|| Value::String(cell.to_string())),
+    }
+}
+
 /// Apply `--toonify` to a pass-through tool result.
 ///
 /// The MCP frontend returns the backend `CallToolResult` verbatim to preserve
 /// structured and typed content, so the TOON re-encoding has to happen here
-/// instead of in the string-returning path. Only JSON text blocks change;
-/// typed content, structured content and error results are left untouched.
+/// instead of in the string-returning path. Only text blocks that parse as
+/// JSON, a CSV table or structured YAML change; typed content, structured
+/// content and error results are left untouched.
 fn toonify_result(toonify: bool, mut result: CallToolResult) -> CallToolResult {
     if !toonify || result.is_error == Some(true) {
         return result;
@@ -863,5 +1007,109 @@ mod toonify_tests {
             other => panic!("expected text content, got {other:?}"),
         };
         assert_eq!(text, "[{\"id\":1,\"name\":\"alpha\"}]");
+    }
+
+    /// CSV, YAML and JSON take the same TOON form; CSV cells and YAML
+    /// scalars keep digits such as `007` and `3.10`.
+    #[test]
+    fn toonify_converts_structured_text() {
+        for (text, expected) in [
+            ("id,name\n1,alpha\n2,beta\n", "[2]{id,name}:\n  1,alpha\n  2,beta"),
+            ("\u{feff}id,name\r\n1,alpha\r\n", "[1]{id,name}:\n  1,alpha"),
+            ("id,note\n1,\"a, b\nc\"\n", "[1]{id,note}:\n  1,\"a, b\\nc\""),
+            (
+                "id,zip,ver,neg,exp,ratio,flag\n42,007,3.10,-0,1e5,2.5,true\n",
+                "[1]{id,zip,ver,neg,exp,ratio,flag}:\n  42,\"007\",\"3.10\",\"-0\",\"1e5\",2.5,true",
+            ),
+            ("a,b\n1,\n", "[1]{a,b}:\n  1,\"\""),
+            ("name: svc\nports:\n  - 80\n  - 443\n", "name: svc\nports[2]: 80,443"),
+            (
+                "- id: 1\n  name: alpha\n- id: 2\n  name: beta\n",
+                "[2]{id,name}:\n  1,alpha\n  2,beta",
+            ),
+            ("results:\n  - id: 1\n    name: x\n", "results[1]{id,name}:\n  1,x"),
+            (
+                "flags:\n  enabled: yes\n  zip: 007\n  when: 2026-09-22\n  big: 1_000\n",
+                "flags:\n  enabled: yes\n  zip: \"007\"\n  when: \"2026-09-22\"\n  big: 1_000",
+            ),
+            // Every JSON document is valid YAML, so JSON must win, BOM or not.
+            ("[{\"id\":1,\"name\":\"alpha\"}]", "[1]{id,name}:\n  1,alpha"),
+            ("\u{feff}{\"a\":[1,2]}", "a[2]: 1,2"),
+        ] {
+            assert_eq!(toonify_output(true, text), expected, "input {text:?}");
+        }
+    }
+
+    #[test]
+    fn toonify_disabled_leaves_csv_and_yaml_untouched() {
+        for text in ["id,name\n1,alpha\n", "name: svc\nports:\n  - 80\n"] {
+            assert_eq!(toonify_output(false, text), text);
+        }
+    }
+
+    /// Prose, logs, flat `key: value` blocks and bullet lists are valid YAML
+    /// or merely contain commas, and YAML with aliases, comments, duplicate
+    /// keys, tags or `.inf` would lose or invent data; none may be rewritten.
+    #[test]
+    fn toonify_leaves_prose_untouched() {
+        for text in [
+            "Hello, world",
+            "Hello, world\nGoodbye, moon\n",
+            "Error: connection refused",
+            "Status: ok\nUptime: 3d\nPython: 3.10\n",
+            "Version: 3.10\nBuild: 42\n",
+            "Content-Type: text/plain\nContent-Length: 12\n",
+            "## Steps\n- open the file\n- save it\n",
+            "Steps:\n- open the file\n- save it\n",
+            "Found 3 files:\n- a.txt\n- b.txt\n",
+            "Errors:\n- foo failed\n- bar failed\n",
+            "- Note: do this\n- Tip: do that\n",
+            "Plan:\n- step one\n  - sub a\n- step two\n",
+            "Total: 1,234 items\nSubtotal: 1,200 items\n",
+            "tags: a,b\nids: 1,2\n",
+            "2026-09-22 10:00:00 INFO started\n2026-09-22 10:00:01 INFO done\n",
+            "2026-09-22,INFO,started\n2026-09-22,INFO,done\n",
+            "1,alpha\n2,beta\n",
+            "id,name\n",
+            "id,name\n1,alpha,extra\n",
+            "id\n1\n2\n",
+            "a,,c\n1,2,3\n",
+            "a,b,a\n1,2,3\n",
+            "id,name \n1,alpha\n",
+            "Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\nValueError: bad\n",
+            "| id | name |\n|---|---|\n| 1 | a |\n",
+            "---\na:\n  b: 1\n---\nc:\n  d: 2\n",
+            "{\"a\":1}\n{\"a\":2}",
+            "a: !custom 1\nb:\n  c: 2\n",
+            "base: &b\n  x: 1\nother: *b\n",
+            "post:\n  title: Hello\n  tags: #ai #ml\n",
+            "event: message\ndata: {\"id\": 1}\n\nevent: message\ndata: {\"id\": 2}\n",
+            "stats:\n  max: .inf\n  min: 0\nitems:\n  - id: 1\n    ok: true\n",
+            "ALLOWED_HOSTS=a,b\nPORTS=80,443\n",
+            "host=x\nport=80\n",
+            "On branch main\nYour branch is up to date with 'origin/main'.\n",
+            "Description:\n  This is a long\n  multi-line note.\nStatus: ok\n",
+            "alpha:filtered",
+            "",
+            "  \n",
+        ] {
+            assert_eq!(toonify_output(true, text), text, "rewrote {text:?}");
+        }
+    }
+
+    #[test]
+    fn toonify_reencodes_csv_text_blocks_of_passthrough_results() {
+        let result: CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": [{"type": "text", "text": "id,name\n1,alpha\n"}]
+        }))
+        .unwrap();
+
+        let result = toonify_result(true, result);
+
+        let text = match &result.content[0].raw {
+            RawContent::Text(text) => text.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(text, "[1]{id,name}:\n  1,alpha");
     }
 }
