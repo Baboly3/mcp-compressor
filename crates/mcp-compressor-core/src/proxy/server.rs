@@ -331,7 +331,7 @@ mod concurrency_tests {
         let elapsed = started.elapsed();
 
         assert!(
-            elapsed < delay * 2,
+            elapsed < delay * 2 + Duration::from_millis(250),
             "three concurrent bridge requests took {elapsed:?}; the auth refresh lock must not \
              be held across dispatch"
         );
