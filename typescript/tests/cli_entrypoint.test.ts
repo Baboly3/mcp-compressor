@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,4 +38,53 @@ describe("npm mcp-compressor bin", () => {
     expect(result.stderr.startsWith("error: unexpected argument '--bogus' found\n")).toBe(true);
     expect(result.stderr).not.toContain("error: error:");
   });
+
+  it("identifies itself to MCP clients with the npm package version", async () => {
+    const env = { ...process.env };
+    delete env.MCP_COMPRESSOR_BINARY;
+    const fixture = join(
+      dirname(cliPath),
+      "..",
+      "..",
+      "crates",
+      "mcp-compressor-core",
+      "tests",
+      "fixtures",
+      "alpha_server.py",
+    );
+    const python = process.env.PYTHON ?? "python3";
+    // Bun consumes the first `--` itself, so pass a second one through to the CLI.
+    const child = spawn("bun", [cliPath, "--", "--", python, fixture], { env });
+    try {
+      const response = await new Promise<string>((resolve, reject) => {
+        let buffer = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          buffer += chunk;
+          const newline = buffer.indexOf("\n");
+          if (newline >= 0) resolve(buffer.slice(0, newline));
+        });
+        child.on("error", reject);
+        child.on("exit", (code) => reject(new Error(`CLI exited early with ${code}`)));
+        child.stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "test", version: "1" },
+            },
+          })}\n`,
+        );
+      });
+      const message = JSON.parse(response) as {
+        result: { serverInfo: { name: string; version: string } };
+      };
+      expect(message.result.serverInfo).toMatchObject({ name: "mcp-compressor", version: VERSION });
+    } finally {
+      child.kill();
+    }
+  }, 30_000);
 });

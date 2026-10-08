@@ -229,7 +229,7 @@ async function runRustCoreCli(args: string[]): Promise<number> {
   const rustArgs = translateArgsForRust(args);
   const binary = process.env.MCP_COMPRESSOR_BINARY;
   if (!binary) {
-    return loadNativeCore().runCliJson(JSON.stringify(["mcp-compressor", ...rustArgs]));
+    return loadNativeCore().runCliJson(JSON.stringify(["mcp-compressor", ...rustArgs]), VERSION);
   }
   return await new Promise((resolve, reject) => {
     const child = spawn(binary, rustArgs, { stdio: "inherit" });

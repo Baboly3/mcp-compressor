@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     if args in (["--version"], ["-V"]):
         print(f"mcp-compressor {_package_version()}")
         return 0
-    return int(_native.run_cli_json(json.dumps(["mcp-compressor", *args])))
+    return int(_native.run_cli_json(json.dumps(["mcp-compressor", *args]), _package_version()))
 
 
 def _package_version() -> str:

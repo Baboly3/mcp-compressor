@@ -23,7 +23,7 @@ export interface NativeCore {
   listOauthCredentialsJson(): string;
   clearOauthCredentialsJson(target?: string | null): string;
   /** Run the whole CLI in-process; blocks until it exits. */
-  runCliJson(argvJson: string): number;
+  runCliJson(argvJson: string, version?: string | null): number;
   startCompressedSessionJson(
     configJson: string,
     backendsJson: string,

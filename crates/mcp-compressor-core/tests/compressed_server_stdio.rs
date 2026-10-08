@@ -377,3 +377,37 @@ async fn mcp_frontend_toonifies_json_text_results() {
     client.close().await.unwrap();
     server_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn mcp_frontend_identifies_itself_as_mcp_compressor() {
+    let server = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        FrontendServer::new(server)
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let mut client =
+        ().serve_with_lifecycle(client_transport, ClientLifecycleMode::Initialize)
+            .await
+            .unwrap();
+
+    // Not rmcp's default identity: clients log and display this name.
+    let peer = client.peer_info().unwrap();
+    let info = peer.server_info.clone().unwrap();
+    assert_eq!(info.name, "mcp-compressor");
+    assert_eq!(info.version, mcp_compressor_core::product_version());
+    drop(peer);
+
+    client.close().await.unwrap();
+    server_task.await.unwrap();
+}

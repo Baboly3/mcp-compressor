@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
-    GetPromptRequestParams, GetPromptResponse, InitializeResult, ListPromptsResult,
+    GetPromptRequestParams, GetPromptResponse, Implementation, InitializeResult, ListPromptsResult,
     ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt, ProtocolVersion,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
     ResourceContents, ResultType, ServerCapabilities, Tool,
@@ -44,6 +44,10 @@ impl ServerHandler for FrontendServer {
                 .enable_prompts()
                 .build(),
         )
+        .with_server_info(Implementation::new(
+            "mcp-compressor",
+            crate::product_version(),
+        ))
         .with_instructions("Compressed MCP frontend server")
     }
 
