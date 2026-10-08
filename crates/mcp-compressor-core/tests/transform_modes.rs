@@ -54,11 +54,16 @@ async fn cli_mode_exposes_help_tool_and_keeps_exec_routing_available() {
     let tools = server.list_frontend_tools().await.unwrap();
     let names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
     assert_eq!(names, ["alpha_help"]);
-    assert!(tools[0]
-        .description
-        .as_deref()
-        .unwrap_or_default()
-        .contains("echo"));
+    // Same text the generated CLI and host transforms use for their help tool.
+    assert_eq!(
+        tools[0].description.as_deref().unwrap_or_default(),
+        mcp_compressor_core::cli::help::render_top_level_help(
+            "alpha",
+            "alpha",
+            &server.backend_tools(),
+            &mcp_compressor_core::cli::help::HelpFraming::help_tool("alpha", "alpha"),
+        )
+    );
 
     let result = server
         .invoke_tool("alpha_invoke_tool", "echo", json!({ "message": "hello" }))
@@ -97,7 +102,7 @@ async fn just_bash_mode_exposes_bash_tool_and_per_server_help_tools() {
     assert!(bash_description.contains("alpha"));
     assert!(bash_description.contains("language-hosted just-bash"));
     assert!(bash_description.contains("beta"));
-    assert!(bash_description.contains("TOON"));
+    assert!(!bash_description.contains("TOON"));
 
     let specs = server.just_bash_provider_specs();
     assert_eq!(specs.len(), 2);

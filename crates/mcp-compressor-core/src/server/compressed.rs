@@ -511,7 +511,7 @@ impl CompressedServer {
         tools.push(Tool::new(
             "bash_tool",
             Some(format!(
-                "Register backend MCP tools as custom commands in a language-hosted just-bash instance. Providers: {names}. When relevant, prefer TOON output for compact representation."
+                "Register backend MCP tools as custom commands in a language-hosted just-bash instance. Providers: {names}."
             )),
             serde_json::json!({
                 "type": "object",
@@ -605,75 +605,17 @@ fn missing_required_tool_input_error(tool: &Tool, missing: &[String]) -> Error {
     ))
 }
 
+/// The `<server>_help` tool description: the same top-level help the generated
+/// CLI prints, framed to steer the model to the command instead of the tool.
+/// Shares the renderer with the FFI host transforms so all surfaces match.
 fn format_backend_help(backend: &ConnectedBackend) -> String {
-    let mut lines = vec![format!(
-        "{} - the {} toolset",
-        backend.public_name, backend.public_name
-    )];
-    lines.push(String::new());
-    lines.push("SUBCOMMANDS:".to_string());
-    for tool in &backend.tools {
-        let subcommand = crate::cli::mapping::tool_name_to_subcommand(&tool.name);
-        let description = short_tool_description(tool.description.as_deref());
-        lines.push(format!("  {subcommand:<35} {description}"));
-    }
-    lines.join("\n")
-}
-
-fn short_tool_description(description: Option<&str>) -> String {
-    let trimmed = description.unwrap_or_default().trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let first_sentence = first_sentence(trimmed);
-    let candidate = if first_sentence.chars().count() >= 10 {
-        first_sentence
-    } else {
-        first_non_empty_line(trimmed)
-    };
-    truncate_clean(candidate, 200)
-}
-
-fn first_sentence(value: &str) -> &str {
-    for (index, ch) in value.char_indices() {
-        if matches!(ch, '.' | '!' | '?') {
-            return value[..=index].trim();
-        }
-    }
-    first_non_empty_line(value)
-}
-
-fn first_non_empty_line(value: &str) -> &str {
-    value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-}
-
-fn truncate_clean(value: &str, max_chars: usize) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let limit = max_chars.saturating_sub(3);
-    let mut end = 0;
-    for (count, (index, ch)) in compact.char_indices().enumerate() {
-        if count >= limit {
-            break;
-        }
-        end = index + ch.len_utf8();
-    }
-    let mut prefix = compact[..end]
-        .trim_end_matches(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == ':')
-        .to_string();
-    if let Some(space) = prefix.rfind(' ') {
-        if space >= max_chars / 2 {
-            prefix.truncate(space);
-        }
-    }
-    prefix.push_str("...");
-    prefix
+    let command = backend.public_name.as_str();
+    crate::cli::help::render_top_level_help(
+        command,
+        command,
+        &backend.tools,
+        &crate::cli::help::HelpFraming::help_tool(command, command),
+    )
 }
 
 pub(crate) fn get_tool_schema_wrapper_tool(name: String, description: &str) -> Tool {
