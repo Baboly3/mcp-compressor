@@ -100,9 +100,135 @@ pub fn write_artifacts(
     Ok(paths)
 }
 
+/// A tool parameter as it appears on the wire and in generated source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParamBinding {
+    /// Property name from the tool's JSON Schema; sent to the bridge verbatim.
+    pub wire_name: String,
+    /// Identifier used for the parameter in generated source.
+    pub identifier: String,
+    pub required: bool,
+}
+
+/// Turn an arbitrary MCP name into a usable identifier.
+///
+/// `base` performs the language's case convention. The result is then made
+/// syntactically valid: characters other than ASCII alphanumerics and `_`
+/// become `_`, a leading digit (or an empty name) gets a `_` prefix, and any
+/// name in `reserved` (language keywords plus names the generated module
+/// defines itself) gets a trailing `_`, the PEP 8 convention for `from_`.
+pub(crate) fn safe_identifier(
+    name: &str,
+    base: impl Fn(&str) -> String,
+    reserved: &[&str],
+) -> String {
+    let mut identifier: String = base(name)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if identifier.is_empty() || identifier.starts_with(|ch: char| ch.is_ascii_digit()) {
+        identifier.insert(0, '_');
+    }
+    if reserved.contains(&identifier.as_str()) {
+        identifier.push('_');
+    }
+    identifier
+}
+
+/// Bind each `(wire_name, required)` parameter to a unique identifier.
+///
+/// Distinct schema names can map to the same identifier (e.g. `fooBar` and
+/// `foo_bar` both snake-case to `foo_bar`); later ones get a numeric suffix so
+/// the generated signature never repeats an argument name.
+pub(crate) fn bind_params(
+    params: Vec<(String, bool)>,
+    to_identifier: impl Fn(&str) -> String,
+) -> Vec<ParamBinding> {
+    let mut taken = std::collections::HashSet::new();
+    params
+        .into_iter()
+        .map(|(wire_name, required)| {
+            let base = to_identifier(&wire_name);
+            let mut identifier = base.clone();
+            let mut suffix = 2;
+            while !taken.insert(identifier.clone()) {
+                identifier = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            ParamBinding {
+                wire_name,
+                identifier,
+                required,
+            }
+        })
+        .collect()
+}
+
+/// Render `name` as a string literal valid in both Python and TypeScript.
+pub(crate) fn string_literal(name: &str) -> String {
+    serde_json::to_string(name).expect("strings always serialize")
+}
+
 // ---------------------------------------------------------------------------
 // Tests (shared contract verified against every implementation)
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::*;
+
+    #[test]
+    fn safe_identifier_sanitizes_and_escapes_reserved_words() {
+        let reserved = &["from", "class"];
+        assert_eq!(safe_identifier("from", str::to_string, reserved), "from_");
+        assert_eq!(
+            safe_identifier("my-param.v2", str::to_string, reserved),
+            "my_param_v2"
+        );
+        assert_eq!(safe_identifier("2fa", str::to_string, reserved), "_2fa");
+        assert_eq!(safe_identifier("", str::to_string, reserved), "_");
+        assert_eq!(
+            safe_identifier("fromDate", str::to_string, reserved),
+            "fromDate"
+        );
+    }
+
+    #[test]
+    fn bind_params_deduplicates_identifiers_but_keeps_wire_names() {
+        let snake = |name: &str| name.replace("Bar", "_bar");
+        let bindings = bind_params(
+            vec![
+                ("foo_bar".into(), true),
+                ("fooBar".into(), false),
+                ("foo_bar_2".into(), false),
+            ],
+            snake,
+        );
+        let pairs: Vec<_> = bindings
+            .iter()
+            .map(|b| (b.wire_name.as_str(), b.identifier.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("foo_bar", "foo_bar"),
+                ("fooBar", "foo_bar_2"),
+                ("foo_bar_2", "foo_bar_2_2")
+            ]
+        );
+    }
+
+    #[test]
+    fn string_literal_is_json_quoted() {
+        assert_eq!(string_literal(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+}
 
 #[cfg(test)]
 pub mod test_helpers {

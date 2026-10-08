@@ -13,7 +13,10 @@
 //! Tool name convention: `snake_case → camelCase`
 //! e.g. `get_confluence_page → getConfluencePage`.
 
-use crate::client_gen::generator::{ClientGenerator, GeneratedArtifact, GeneratorConfig};
+use crate::client_gen::generator::{
+    bind_params, safe_identifier, string_literal, ClientGenerator, GeneratedArtifact,
+    GeneratorConfig, ParamBinding,
+};
 use crate::Error;
 
 pub struct TypeScriptGenerator;
@@ -78,22 +81,20 @@ function unwrapProxyResponse(body: string): string {{
     );
 
     for tool in &config.tools {
-        let function_name = snake_to_camel(&tool.name);
-        let params = ts_params(tool);
-        let input = ts_input_object(tool);
+        let bindings = ts_bindings(tool);
         let doc = ts_doc_comment(tool.description.as_deref().unwrap_or(""));
         module.push_str(&format!(
             r#"
 {doc}
 export async function {function_name}({params}): Promise<string> {{
-  return execTool({tool_name:?}, {input});
+  return execTool({tool_name}, {input});
 }}
 "#,
             doc = doc,
-            function_name = function_name,
-            params = params,
-            tool_name = tool.name,
-            input = input,
+            function_name = ts_identifier(&tool.name),
+            params = ts_params(&bindings),
+            tool_name = string_literal(&tool.name),
+            input = ts_input_object(&bindings, tool),
         ));
     }
 
@@ -107,8 +108,8 @@ fn render_dts(config: &GeneratorConfig) -> String {
         declarations.push_str(&format!(
             "{doc}\nexport function {name}({params}): Promise<string>;\n",
             doc = doc,
-            name = snake_to_camel(&tool.name),
-            params = ts_params(tool),
+            name = ts_identifier(&tool.name),
+            params = ts_params(&ts_bindings(tool)),
         ));
     }
     declarations
@@ -142,25 +143,107 @@ fn snake_to_camel(name: &str) -> String {
     out
 }
 
-fn ts_params(tool: &crate::compression::engine::Tool) -> String {
-    ordered_param_names(tool)
-        .into_iter()
-        .map(|(name, required)| {
-            if required {
-                format!("{name}: string")
+/// Reserved words that cannot name a strict-mode parameter or function, plus the
+/// module-level names the generated client defines.
+const TS_RESERVED: &[&str] = &[
+    "arguments",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "eval",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "BRIDGE",
+    "TOKEN",
+    "SESSION_PID",
+    "HEADERS",
+    "execTool",
+    "unwrapProxyResponse",
+];
+
+fn ts_identifier(name: &str) -> String {
+    safe_identifier(name, snake_to_camel, TS_RESERVED)
+}
+
+fn ts_bindings(tool: &crate::compression::engine::Tool) -> Vec<ParamBinding> {
+    bind_params(ordered_param_names(tool), |name| {
+        safe_identifier(name, str::to_string, TS_RESERVED)
+    })
+}
+
+fn ts_params(bindings: &[ParamBinding]) -> String {
+    bindings
+        .iter()
+        .map(|binding| {
+            if binding.required {
+                format!("{}: string", binding.identifier)
             } else {
-                format!("{name}?: string")
+                format!("{}?: string", binding.identifier)
             }
         })
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn ts_input_object(tool: &crate::compression::engine::Tool) -> String {
-    let pairs = tool
-        .param_names()
-        .into_iter()
-        .map(|name| format!("{name}: {name}"))
+/// Render the payload object, keeping the schema's property order on the wire.
+fn ts_input_object(bindings: &[ParamBinding], tool: &crate::compression::engine::Tool) -> String {
+    let schema_order = tool.param_names();
+    let mut ordered: Vec<&ParamBinding> = bindings.iter().collect();
+    ordered.sort_by_key(|binding| {
+        schema_order
+            .iter()
+            .position(|name| *name == binding.wire_name)
+    });
+    let pairs = ordered
+        .iter()
+        .map(|binding| {
+            format!(
+                "{}: {}",
+                string_literal(&binding.wire_name),
+                binding.identifier
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{ {pairs} }}")
@@ -424,7 +507,7 @@ mod tests {
         let content = fs::read_to_string(ts).unwrap();
         let declarations = fs::read_to_string(dts).unwrap();
         assert!(content.contains("export async function realTool(required_second: string, optional_first?: string, optional_third?: string): Promise<string>"));
-        assert!(content.contains("{ optional_first: optional_first, required_second: required_second, optional_third: optional_third }"));
+        assert!(content.contains(r#"{ "optional_first": optional_first, "required_second": required_second, "optional_third": optional_third }"#));
         assert!(declarations.contains("export function realTool(required_second: string, optional_first?: string, optional_third?: string): Promise<string>;"));
     }
 
