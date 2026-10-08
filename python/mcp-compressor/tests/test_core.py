@@ -185,7 +185,7 @@ def test_generated_cli_client_dispatches_help_and_unknown_subcommand(monkeypatch
     assert "OPTIONS:" in sub_help.stdout
     assert "--message" in sub_help.stdout
 
-    # An unknown subcommand is rejected with exit code 2 and a usage message.
+    # An unknown subcommand is a usage error: exit 2 with a pointer to --help.
     unknown = subprocess.run(  # noqa: S603 - trusted generated test CLI
         [str(cli_script), "definitely-not-a-subcommand"],
         text=True,
@@ -193,7 +193,11 @@ def test_generated_cli_client_dispatches_help_and_unknown_subcommand(monkeypatch
         timeout=30,
     )
     assert unknown.returncode == 2
-    assert "Usage:" in unknown.stderr
+    assert unknown.stdout == ""
+    assert unknown.stderr.splitlines() == [
+        "parse error: unknown subcommand: definitely-not-a-subcommand",
+        "Run 'alpha --help' for usage.",
+    ]
 
 
 def test_high_level_compressor_client_reports_invalid_server_config() -> None:
