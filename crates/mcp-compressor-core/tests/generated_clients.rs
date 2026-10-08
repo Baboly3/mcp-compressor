@@ -375,6 +375,45 @@ async fn generated_cli_script_invokes_real_proxy_and_backend() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_cli_reports_auth_refresh_failure_without_details() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let compressed = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
+    let before_exec: BeforeExecHook = Arc::new(|| {
+        Box::pin(async {
+            Err(mcp_compressor_core::Error::Auth(
+                "secret-token-should-not-leak".to_string(),
+            ))
+        })
+    });
+    let proxy = ToolProxyServer::start_with_before_exec(compressed, before_exec)
+        .await
+        .unwrap();
+    let config = GeneratorConfig {
+        cli_name: "alpha".to_string(),
+        bridge_url: proxy.bridge_url().to_string(),
+        token: proxy.token_value().to_string(),
+        tools: real_backend_tools().await,
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+
+    let output =
+        generated_script_output(&tempdir.path().join("alpha"), &["echo", "--message", "x"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+        "auth error: auth provider refresh failed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_cli_request_runs_before_exec_hook_once() {
     let tempdir = tempfile::tempdir().unwrap();
     let compressed = CompressedServer::connect_stdio(

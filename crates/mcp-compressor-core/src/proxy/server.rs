@@ -164,7 +164,8 @@ async fn exec(
             // concurrent generated-client calls would queue behind each other.
             let _refresh_guard = before_exec.request_lock.lock().await;
             if (before_exec.hook)().await.is_err() {
-                return close_response(StatusCode::BAD_REQUEST, "auth provider refresh failed");
+                // Redacted: the provider error may carry credentials.
+                return error_response(&Error::Auth("auth provider refresh failed".to_string()));
             }
         }
         dispatch_exec(&state.server, request.tool, request.input).await
