@@ -552,3 +552,40 @@ async function runScriptResult(
     );
   });
 }
+
+describe("compressTools toonify option", () => {
+  const tools = {
+    structured: {
+      description: "Return rows.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => ({
+        rows: [
+          { id: 1, ok: true },
+          { id: 2, ok: false },
+        ],
+        total: 2,
+      }),
+    },
+    prose: {
+      description: "Return prose with commas.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => "Hello,world\nFoo,bar",
+    },
+  };
+  const invoke = (compressed: ReturnType<typeof compressTools>, name: string) =>
+    compressed.invoke_tool?.execute({ tool_name: name, tool_input: {} });
+
+  it("returns JSON by default", async () => {
+    const compressed = compressTools(tools);
+    await expect(invoke(compressed, "structured")).resolves.toBe(
+      '{"rows":[{"id":1,"ok":true},{"id":2,"ok":false}],"total":2}',
+    );
+  });
+
+  it("converts structured results to TOON when enabled", async () => {
+    const compressed = compressTools(tools, { toonify: true });
+    await expect(invoke(compressed, "structured")).resolves.toBe(
+      "rows[2]{id,ok}:\n  1,true\n  2,false\ntotal: 2",
+    );
+  });
+});

@@ -1,4 +1,9 @@
-import { compressToolListing, formatToolSchemaResponse, type ToolSpec } from "./rust_core.js";
+import {
+  compressToolListing,
+  formatToolSchemaResponse,
+  normalizeHostToolResult,
+  type ToolSpec,
+} from "./rust_core.js";
 import type { CompressionLevel } from "./types.js";
 import type { ExecutableTool } from "./adapters.js";
 import { stringifyToolResult } from "./tool_specs.js";
@@ -65,11 +70,9 @@ function validateRequiredToolInput(spec: ToolSpec, toolInput: unknown): void {
 }
 
 function normalizeResult(value: unknown, toonify: boolean): string {
-  const json = stringifyToolResult(value);
-  if (!toonify) return json;
-  // Keep local compression dependency-light for now. Runtime MCP proxy paths use
-  // Rust TOON support; local in-process tools return JSON-compatible strings.
-  return json;
+  if (!toonify) return stringifyToolResult(value);
+  // Same conversion the proxy and host transforms apply.
+  return normalizeHostToolResult(value, true);
 }
 
 export function compressTools(
