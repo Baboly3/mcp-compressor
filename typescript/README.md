@@ -72,7 +72,7 @@ atlassian search-confluence --query oauth
 atlassian get-jira-issue --issue-url https://jira.example.com/browse/PROJ-123
 ```
 
-TOON output formatting is automatically enabled in CLI mode.
+Tool output is returned verbatim in CLI mode. Pass `--toonify` to opt in to TOON conversion of JSON, CSV and YAML results.
 
 ### Bash mode
 

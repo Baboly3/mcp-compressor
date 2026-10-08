@@ -1,7 +1,5 @@
 alpha - the alpha toolset
 
-When relevant, outputs from this CLI will prefer using the TOON format for more efficient representation of data.
-
 USAGE:
   alpha <subcommand> [options]
 

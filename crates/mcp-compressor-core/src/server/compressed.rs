@@ -604,8 +604,6 @@ fn format_backend_help(backend: &ConnectedBackend) -> String {
         backend.public_name, backend.public_name
     )];
     lines.push(String::new());
-    lines.push("When relevant, outputs from this CLI will prefer using the TOON format for more efficient representation of data.".to_string());
-    lines.push(String::new());
     lines.push("SUBCOMMANDS:".to_string());
     for tool in &backend.tools {
         let subcommand = crate::cli::mapping::tool_name_to_subcommand(&tool.name);

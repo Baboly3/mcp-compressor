@@ -656,6 +656,23 @@ describe("local TypeScript tool compression", () => {
     ).rejects.toThrow("Tool not found: missing");
   });
 
+  it("converts Just Bash output to TOON only when toonify is requested", async () => {
+    const tools = {
+      rows: {
+        name: "rows",
+        description: "Return structured rows.",
+        inputSchema: { type: "object", properties: {} },
+        execute: async (): Promise<unknown> => ({ rows: [{ message: "bash", ok: true }] }),
+      },
+    };
+    const bash = new Bash({ customCommands: [] });
+    transformToolsForJustBash(tools, { bash, serverName: "alpha", toonify: true });
+    const commandResult = await bash.exec("alpha rows");
+    expect(commandResult.exitCode).toBe(0);
+    expect(commandResult.stdout).toContain("rows[1]{message,ok}:");
+    expect(commandResult.stdout).toContain("bash,true");
+  });
+
   it("transforms executable tools into direct Just Bash commands plus help tools", async () => {
     const bash = new Bash({ customCommands: [] });
     const result = transformToolsForJustBash(
@@ -682,8 +699,7 @@ describe("local TypeScript tool compression", () => {
     if (commandResult.exitCode !== 0) {
       throw new Error(`Just Bash failed: ${commandResult.stderr}`);
     }
-    expect(commandResult.stdout).toContain("rows[1]{message,ok}:");
-    expect(commandResult.stdout).toContain("bash,true");
+    expect(JSON.parse(commandResult.stdout)).toEqual({ rows: [{ message: "bash", ok: true }] });
     expect(result.tools.alpha_help?.description).toContain(
       "Functionality associated with the alpha toolset is provided via the `alpha` CLI.",
     );

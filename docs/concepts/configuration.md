@@ -143,6 +143,8 @@ Filters are applied before compression: the compressed frontend only sees the fi
 
 TOON (Token-Oriented Object Notation) is a token-efficient alternative representation for JSON-structured data. When enabled, the proxy converts JSON, CSV and YAML text in tool outputs to TOON format before returning results to the client. TOON encodes the same information as JSON using fewer tokens, which reduces the context consumed by large tool responses.
 
+TOON conversion is off by default in every mode, including CLI mode and Just Bash, so tool output reaches the agent verbatim (and stays pipeable into tools such as `jq`). In the TypeScript Just Bash APIs (`planToolsForJustBash` / `transformToolsForJustBash`), opt in with `toonify: true`.
+
 === "CLI"
 
     ```bash
