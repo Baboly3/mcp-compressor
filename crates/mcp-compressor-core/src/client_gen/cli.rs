@@ -83,7 +83,7 @@ fn client_python_body(config: &GeneratorConfig) -> String {
     let subcommands = serde_json::Value::Object(subcommand_map).to_string();
     let subcommand_help = serde_json::Value::Object(subcommand_help_map).to_string();
     format!(
-        r#"import base64, json, math, os, re, sys, urllib.error, urllib.request
+        r#"import base64, json, math, os, re, socket, sys, urllib.error, urllib.request
 
 CLI_NAME = {cli_name}
 
@@ -272,10 +272,65 @@ def coerce_value(flag, schema, raw_value, forced_bool=None):
         if not isinstance(parsed, dict):
             raise UsageError("parse", f"invalid JSON object for {{flag}}: {{raw_value or ''}}")
         return parsed
+    return coerce_untyped(schema, raw_value or "")
+
+def allowed_json_types(schema):
+    typ = schema.get("type")
+    if isinstance(typ, str):
+        return [typ]
+    if isinstance(typ, list):
+        return [t for t in typ if isinstance(t, str)]
+    if isinstance(schema.get("enum"), list):
+        return [json_type_name(value) for value in schema["enum"]]
+    if "const" in schema:
+        return [json_type_name(schema["const"])]
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list):
+            allowed = []
+            for variant in variants:
+                types = allowed_json_types(variant) if isinstance(variant, dict) else None
+                if types is None:
+                    return None
+                allowed.extend(types)
+            return allowed
+    return None
+
+def json_type_name(value):
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+def coerce_untyped(schema, raw):
+    # Mirrors the Rust parser: decode JSON only when the schema accepts the
+    # decoded type; otherwise keep the raw text if strings are accepted.
     try:
-        return json.loads(raw_value or "")
+        decoded = json.loads(raw, parse_constant=lambda name: float(name))
+        ok = True
     except Exception:
-        return raw_value or ""
+        decoded, ok = None, False
+    if ok and isinstance(decoded, float) and not math.isfinite(decoded):
+        decoded, ok = None, False
+    allowed = allowed_json_types(schema)
+    if allowed is None:
+        return decoded if ok else raw
+    if ok:
+        typ = json_type_name(decoded)
+        if typ in allowed or (typ == "integer" and "number" in allowed):
+            return decoded
+    if "string" in allowed:
+        return raw
+    return decoded if ok else raw
 
 def validate_value(flag, schema, value):
     allowed = enum_values(schema)
@@ -353,6 +408,22 @@ def usage_failure(error, help_command):
     print(f"Run '{{help_command}} --help' for usage.", file=sys.stderr)
     return 2
 
+def request_timeout():
+    # No client-side limit by default: the proxy enforces the backend's
+    # --timeout, and a shorter limit here would cut off slow tools early.
+    raw = os.environ.get("MCP_COMPRESSOR_REQUEST_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+def timeout_message(timeout):
+    return (
+        f"timed out after {{timeout:g}}s waiting for the tool result "
+        "(MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)"
+    )
+
 def bridge_error_message(status, body):
     try:
         parsed = json.loads(body)
@@ -406,13 +477,20 @@ def main():
         headers={{"Content-Type": "application/json", "Authorization": "Bearer " + token}},
         method="POST",
     )
+    timeout = request_timeout()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             sys.stdout.write(unwrap_proxy_response(resp.read().decode()))
     except urllib.error.HTTPError as exc:
         print(bridge_error_message(exc.code, exc.read().decode(errors="replace")), file=sys.stderr)
         return 1
+    except (socket.timeout, TimeoutError):
+        print(timeout_message(timeout), file=sys.stderr)
+        return 1
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+            print(timeout_message(timeout), file=sys.stderr)
+            return 1
         print(
             "mcp-compressor proxy is not running; restart the mcp-compressor CLI-mode process and try again.",
             file=sys.stderr,
@@ -750,7 +828,6 @@ mod tests {
         assert!(content.contains("--url <string>"));
         assert!(content.contains("--url"));
         assert!(content.contains("--url <string>"));
-        assert!(content.contains("Required."));
         assert!(content.contains("URL to fetch."));
         assert!(content.contains("--timeout"));
         assert!(content.contains("--timeout <integer>"));

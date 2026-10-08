@@ -7,10 +7,8 @@ USAGE:
 
 REQUIRED:
   --cloud-id <string>
-      Required.
       Cloud ID
   --jql <string>
-      Required.
       JQL query
 
 OPTIONAL:

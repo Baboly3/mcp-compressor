@@ -7,7 +7,6 @@ USAGE:
 
 REQUIRED:
   --message <string>
-      Required.
       Message to echo
 
 GLOBAL OPTIONS:

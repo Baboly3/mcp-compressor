@@ -149,14 +149,20 @@ SUBCOMMANDS:
 
 ### Generated Python Code Mode module
 
-The generated Python module exposes normal functions:
+The generated Python module exposes normal functions with snake_case names. Parameters get type hints from the tool's input schema, and docstrings document each argument:
 
 ```python
 # generated-py/atlassian.py
 
-def getAccessibleAtlassianResources() -> str: ...
+def get_accessible_atlassian_resources() -> str: ...
 
-def getConfluencePage(page_id: str) -> str: ...
+def get_confluence_page(cloud_id: str, page_id: str, content_format: str | None = None) -> str:
+    """Get a Confluence page.
+
+    Args:
+        cloud_id: Cloud ID (UUID or site URL)
+        content_format: One of: html, markdown, adf.
+    """
 ```
 
 Use it from an agent or application:
@@ -167,18 +173,22 @@ sys.path.insert(0, "./generated-py")
 
 import atlassian
 
-resources = atlassian.getAccessibleAtlassianResources()
-page = atlassian.getConfluencePage(page_id="123456")
+resources = atlassian.get_accessible_atlassian_resources()
+page = atlassian.get_confluence_page(cloud_id="my-site.atlassian.net", page_id="123456")
 ```
 
 ### Generated TypeScript Code Mode module
 
-The generated TypeScript module exposes typed async functions:
+The generated TypeScript module exposes typed async functions. Parameter types come from the tool's input schema: numbers, booleans, enum literals, arrays, and object shapes. Anything the schema doesn't pin down is `unknown`. Parameter descriptions become `@param` JSDoc tags:
 
 ```ts
 // generated-ts/atlassian.ts
 export async function getAccessibleAtlassianResources(): Promise<string>;
-export async function getConfluencePage(pageId: string): Promise<string>;
+export async function getConfluencePage(
+  cloudId: string,
+  pageId: string,
+  contentFormat?: "html" | "markdown" | "adf",
+): Promise<string>;
 ```
 
 Use it from an agent or application:
@@ -190,7 +200,7 @@ import {
 } from "./generated-ts/atlassian.ts";
 
 const resources = await getAccessibleAtlassianResources();
-const page = await getConfluencePage("123456");
+const page = await getConfluencePage("my-site.atlassian.net", "123456");
 ```
 
 ## How an agent might use CLI Mode
@@ -231,6 +241,10 @@ Error messages name the flag the agent typed, such as `--page-id`, not the schem
 
 In Code Mode, a tool failure raises `RuntimeError` in Python and rejects with an `Error` in TypeScript. Either way the message is the tool's own error text.
 
+### Timeouts
+
+Generated clients don't set a request timeout of their own. A call waits as long as the proxy does, and the proxy applies the backend `--timeout` you configured. To cap a single client's wait, set `MCP_COMPRESSOR_REQUEST_TIMEOUT` to a number of seconds in its environment. When the cap is hit, the CLI exits `1`, Python raises `TimeoutError`, and TypeScript rejects with an `Error`. The message is `timed out after <n>s waiting for the tool result`.
+
 ## How an agent might use Code Mode
 
 A Python-capable agent can inspect the generated module or use normal autocomplete/static analysis:
@@ -239,7 +253,7 @@ A Python-capable agent can inspect the generated module or use normal autocomple
 import atlassian
 
 # Ask for a resource list only when needed.
-print(atlassian.getAccessibleAtlassianResources())
+print(atlassian.get_accessible_atlassian_resources())
 ```
 
 A TypeScript-capable agent can do the same with generated declarations:

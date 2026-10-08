@@ -159,7 +159,7 @@ atlassian get-accessible-atlassian-resources
 # generated-py/atlassian.py
 import atlassian
 
-resources = atlassian.getAccessibleAtlassianResources()
+resources = atlassian.get_accessible_atlassian_resources()
 ```
 
 ```ts

@@ -511,7 +511,7 @@ impl CompressedServer {
         tools.push(Tool::new(
             "bash_tool",
             Some(format!(
-                "Register backend MCP tools as custom commands in a language-hosted just-bash instance. Providers: {names}. When relevant, prefer TOON output for compact representation."
+                "Register backend MCP tools as custom commands in a language-hosted just-bash instance. Providers: {names}."
             )),
             serde_json::json!({
                 "type": "object",
@@ -605,75 +605,17 @@ fn missing_required_tool_input_error(tool: &Tool, missing: &[String]) -> Error {
     ))
 }
 
+/// The `<server>_help` tool description: the same top-level help the generated
+/// CLI prints, framed to steer the model to the command instead of the tool.
+/// Shares the renderer with the FFI host transforms so all surfaces match.
 fn format_backend_help(backend: &ConnectedBackend) -> String {
-    let mut lines = vec![format!(
-        "{} - the {} toolset",
-        backend.public_name, backend.public_name
-    )];
-    lines.push(String::new());
-    lines.push("SUBCOMMANDS:".to_string());
-    for tool in &backend.tools {
-        let subcommand = crate::cli::mapping::tool_name_to_subcommand(&tool.name);
-        let description = short_tool_description(tool.description.as_deref());
-        lines.push(format!("  {subcommand:<35} {description}"));
-    }
-    lines.join("\n")
-}
-
-fn short_tool_description(description: Option<&str>) -> String {
-    let trimmed = description.unwrap_or_default().trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let first_sentence = first_sentence(trimmed);
-    let candidate = if first_sentence.chars().count() >= 10 {
-        first_sentence
-    } else {
-        first_non_empty_line(trimmed)
-    };
-    truncate_clean(candidate, 200)
-}
-
-fn first_sentence(value: &str) -> &str {
-    for (index, ch) in value.char_indices() {
-        if matches!(ch, '.' | '!' | '?') {
-            return value[..=index].trim();
-        }
-    }
-    first_non_empty_line(value)
-}
-
-fn first_non_empty_line(value: &str) -> &str {
-    value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-}
-
-fn truncate_clean(value: &str, max_chars: usize) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let limit = max_chars.saturating_sub(3);
-    let mut end = 0;
-    for (count, (index, ch)) in compact.char_indices().enumerate() {
-        if count >= limit {
-            break;
-        }
-        end = index + ch.len_utf8();
-    }
-    let mut prefix = compact[..end]
-        .trim_end_matches(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == ':')
-        .to_string();
-    if let Some(space) = prefix.rfind(' ') {
-        if space >= max_chars / 2 {
-            prefix.truncate(space);
-        }
-    }
-    prefix.push_str("...");
-    prefix
+    let command = backend.public_name.as_str();
+    crate::cli::help::render_top_level_help(
+        command,
+        command,
+        &backend.tools,
+        &crate::cli::help::HelpFraming::help_tool(command, command),
+    )
 }
 
 pub(crate) fn get_tool_schema_wrapper_tool(name: String, description: &str) -> Tool {
@@ -862,8 +804,10 @@ fn yaml_is_structured(value: &Value) -> bool {
 }
 
 /// Headers must look like column names, so logs, `KEY=a,b` lines and prose
-/// stay out; rows of a different width fail the non-flexible reader.
-/// "Hello,world\nFoo,bar" still converts.
+/// stay out; rows of a different width fail the non-flexible reader. A
+/// single row of plain words under plain-word headers ("Hello,world\nFoo,bar")
+/// reads as two lines of prose, so one row must hold a number, boolean or
+/// empty cell to count as data.
 fn csv_to_json(text: &str) -> Option<Value> {
     let mut reader = csv::Reader::from_reader(text.as_bytes());
     let headers = reader.headers().ok()?.clone();
@@ -896,7 +840,16 @@ fn csv_to_json(text: &str) -> Option<Value> {
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    (!rows.is_empty()).then_some(Value::Array(rows))
+    let looks_like_data = match rows.as_slice() {
+        [] => false,
+        [row] => row.as_object().is_some_and(|cells| {
+            cells
+                .values()
+                .any(|cell| !cell.is_string() || cell.as_str() == Some(""))
+        }),
+        _ => true,
+    };
+    looks_like_data.then_some(Value::Array(rows))
 }
 
 /// Typed only when it prints back as the same text, so "007" and "3.10" survive.
@@ -1006,6 +959,11 @@ mod toonify_tests {
                 "[1]{id,zip,ver,neg,exp,ratio,flag}:\n  42,\"007\",\"3.10\",\"-0\",\"1e5\",2.5,true",
             ),
             ("a,b\n1,\n", "[1]{a,b}:\n  1,\"\""),
+            // Several all-text rows are still a table.
+            (
+                "name,team\nada,core\nlin,web\n",
+                "[2]{name,team}:\n  ada,core\n  lin,web",
+            ),
             ("name: svc\nports:\n  - 80\n  - 443\n", "name: svc\nports[2]: 80,443"),
             (
                 "- id: 1\n  name: alpha\n- id: 2\n  name: beta\n",
@@ -1054,6 +1012,8 @@ mod toonify_tests {
             "2026-09-22 10:00:00 INFO started\n2026-09-22 10:00:01 INFO done\n",
             "2026-09-22,INFO,started\n2026-09-22,INFO,done\n",
             "1,alpha\n2,beta\n",
+            "Hello,world\nFoo,bar",
+            "Yes,thanks\nSee,you\n",
             "id,name\n",
             "id,name\n1,alpha,extra\n",
             "id\n1\n2\n",

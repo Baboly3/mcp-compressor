@@ -219,12 +219,6 @@ fn truncate_clean(value: &str, max_chars: usize) -> String {
     prefix
 }
 
-/// Collapse internal whitespace runs into single spaces, keeping the text on a
-/// single line.
-pub fn full_description(description: &str) -> String {
-    description.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Render a tool's top-level description while preserving its original line
 /// structure. Each line is trimmed and has internal whitespace runs collapsed,
 /// but newlines (including blank lines between paragraphs) are kept so the
@@ -314,7 +308,7 @@ fn tool_options(tool: &Tool) -> Vec<ToolOption> {
                         description: schema
                             .get("description")
                             .and_then(|value| value.as_str())
-                            .map(full_description),
+                            .and_then(description_lines),
                         default: schema.get("default").map(default_value_label),
                         enum_values: schema_enum_values(schema),
                         minimum: schema_number_constraint(schema, "minimum"),
@@ -348,9 +342,7 @@ fn format_tool_option_help(option: &ToolOption) -> String {
     let flag = format!("--{}", tool_name_to_subcommand(&option.name));
     let mut output = format!("  {flag} <{}>\n", option.ty);
     let mut details = Vec::new();
-    if option.required {
-        details.push("Required.".to_string());
-    }
+    // Required options are listed under REQUIRED:, so no per-option marker.
     if let Some(description) = &option.description {
         details.push(description.clone());
     }
@@ -406,14 +398,36 @@ fn schema_type_details(schema: &serde_json::Value) -> (String, bool, Option<Stri
     if !labels.is_empty() {
         return (labels.join("|"), false, None);
     }
-    if schema.get("oneOf").is_some()
-        || schema.get("anyOf").is_some()
-        || schema.get("allOf").is_some()
-    {
+    if schema.get("oneOf").is_some() || schema.get("anyOf").is_some() {
+        let accepts_string = ["oneOf", "anyOf"].iter().any(|key| {
+            schema
+                .get(key)
+                .and_then(|value| value.as_array())
+                .is_some_and(|variants| {
+                    variants.iter().any(|variant| {
+                        variant.get("type").and_then(|t| t.as_str()) == Some("string")
+                    })
+                })
+        });
+        return if accepts_string {
+            (
+                "string|json".to_string(),
+                true,
+                Some("Pass plain text, or JSON for a structured value.".to_string()),
+            )
+        } else {
+            (
+                "json".to_string(),
+                true,
+                Some("Pass a JSON value matching one of the schema's variants.".to_string()),
+            )
+        };
+    }
+    if schema.get("allOf").is_some() {
         return (
             "json".to_string(),
             true,
-            Some("Schema contains oneOf/anyOf/allOf; use --json for complex input.".to_string()),
+            Some("Pass a JSON value matching the schema.".to_string()),
         );
     }
     match schema.get("type").and_then(|value| value.as_str()) {
@@ -473,28 +487,43 @@ fn default_value_label(value: &serde_json::Value) -> String {
     }
 }
 
+/// Word-wrap `value` at `width` columns with an `indent`-space prefix.
+///
+/// Each source line wraps on its own, so line breaks in a description (lists,
+/// paragraphs) survive instead of running together into one block.
 fn wrap_indented(value: &str, indent: usize, width: usize) -> String {
     let prefix = " ".repeat(indent);
     let mut output = String::new();
-    let mut line = String::new();
-    for word in value.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > width.saturating_sub(indent) {
+    for source_line in value.lines() {
+        if source_line.trim().is_empty() {
+            output.push('\n');
+            continue;
+        }
+        let mut line = String::new();
+        for word in source_line.split_whitespace() {
+            if !line.is_empty() && line.len() + 1 + word.len() > width.saturating_sub(indent) {
+                output.push_str(&prefix);
+                output.push_str(line.trim_end());
+                output.push('\n');
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
             output.push_str(&prefix);
             output.push_str(line.trim_end());
             output.push('\n');
-            line.clear();
         }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        output.push_str(&prefix);
-        output.push_str(line.trim_end());
-        output.push('\n');
     }
     output
+}
+
+/// A parameter description with its line structure kept, or `None` if blank.
+fn description_lines(description: &str) -> Option<String> {
+    (!description.trim().is_empty()).then(|| tool_description_block(description))
 }
 
 #[cfg(test)]
@@ -579,6 +608,66 @@ mod tests {
         assert!(help.contains("Allowed values: score, timestamp."));
         assert!(help.contains("GLOBAL OPTIONS:"));
         assert!(help.contains("--json"));
+    }
+
+    #[test]
+    fn option_descriptions_keep_their_line_breaks() {
+        let tool = Tool {
+            name: "create".to_string(),
+            description: Some("Create.".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "How to create:\n- draft: not   published\n- live: published now"
+                    }
+                }
+            }),
+        };
+        let help = render_subcommand_help("svc", &tool);
+        assert!(
+            help.contains("  --mode <string>\n      How to create:\n      - draft: not published\n      - live: published now\n"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn required_options_are_not_marked_twice() {
+        let help = render_subcommand_help("svc", &tool("search", "Search things."));
+        assert!(
+            help.contains("REQUIRED:\n  --query <string>\n      Search query.\n"),
+            "{help}"
+        );
+        assert!(!help.contains("Required."), "{help}");
+    }
+
+    #[test]
+    fn union_options_say_whether_plain_text_is_accepted() {
+        let tool = Tool {
+            name: "post".to_string(),
+            description: Some("Post.".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "body": { "anyOf": [{ "type": "string" }, { "type": "object" }] },
+                    "id": { "oneOf": [{ "type": "integer" }, { "type": "object" }] }
+                }
+            }),
+        };
+        let help = render_subcommand_help("svc", &tool);
+        assert!(
+            help.contains(
+                "  --body <string|json>\n      Pass plain text, or JSON for a structured value.\n"
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains(
+                "  --id <json>\n      Pass a JSON value matching one of the schema's variants.\n"
+            ),
+            "{help}"
+        );
     }
 
     #[test]

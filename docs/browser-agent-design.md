@@ -321,8 +321,9 @@ sequenceDiagram
 
 ### Piping and TOON support
 
-The existing `createPipingHintPlugin` (AST transform for `MCP_TOONIFY`) operates on
-just-bash's parsed AST and is pure TypeScript. It works in the browser without changes.
+Just Bash commands return tool output verbatim by default, so piping into `jq` works
+without an AST transform. TOON conversion is opt-in via the `toonify` option and runs in the Rust core, so a
+browser build needs the WASM core for it.
 
 ---
 
@@ -422,7 +423,6 @@ export {
   createJustBashCommandRegistrations,
   installJustBashRegistrations,
 } from "../just_bash_commands.js";
-export { createPipingHintPlugin, installPipingHintPlugin } from "../just_bash_transform.js";
 ```
 
 The package.json `exports` map gains a `./browser` entry:
@@ -493,7 +493,7 @@ block-beta
 
   block:today["Works today (Node.js only)"]:1
     A["CompressorClient / CompressorProxy"]
-    B["installJustBashCommands\ninstallPipingHintPlugin"]
+    B["installJustBashCommands"]
     C["compressTools (local tools)"]
     D["toAISDKTools / toMastraTools"]
     E["OAuth (loopback callback)"]

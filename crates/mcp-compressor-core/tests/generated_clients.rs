@@ -375,6 +375,45 @@ async fn generated_cli_script_invokes_real_proxy_and_backend() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_cli_reports_auth_refresh_failure_without_details() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let compressed = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
+    let before_exec: BeforeExecHook = Arc::new(|| {
+        Box::pin(async {
+            Err(mcp_compressor_core::Error::Auth(
+                "secret-token-should-not-leak".to_string(),
+            ))
+        })
+    });
+    let proxy = ToolProxyServer::start_with_before_exec(compressed, before_exec)
+        .await
+        .unwrap();
+    let config = GeneratorConfig {
+        cli_name: "alpha".to_string(),
+        bridge_url: proxy.bridge_url().to_string(),
+        token: proxy.token_value().to_string(),
+        tools: real_backend_tools().await,
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+
+    let output =
+        generated_script_output(&tempdir.path().join("alpha"), &["echo", "--message", "x"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+        "auth error: auth provider refresh failed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_cli_request_runs_before_exec_hook_once() {
     let tempdir = tempfile::tempdir().unwrap();
     let compressed = CompressedServer::connect_stdio(
@@ -918,7 +957,7 @@ fn start_echo_bridge() -> TestBridge {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
-        for stream in listener.incoming().take(16) {
+        for stream in listener.incoming().take(64) {
             let mut stream = stream.unwrap();
             let request = read_http_request(&mut stream);
             let body = if request.starts_with("GET /health") {
@@ -1276,4 +1315,179 @@ async fn generated_clients_surface_backend_tool_errors() {
         String::from_utf8_lossy(&output.stdout).trim(),
         "fixture tool error"
     );
+}
+
+/// The generated CLI's embedded parser must coerce multi-type properties
+/// exactly like the Rust parser (`multi_type_args_decode_json_only_into_accepted_types`).
+#[test]
+fn generated_cli_decodes_json_only_into_accepted_types() {
+    let bridge = start_echo_bridge();
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = GeneratorConfig {
+        cli_name: "multi".to_string(),
+        bridge_url: bridge.url.clone(),
+        token: "token".to_string(),
+        tools: vec![mcp_compressor_core::compression::engine::Tool::new(
+            "set",
+            Some("Set values.".to_string()),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "body": { "anyOf": [{ "type": "string" }, { "type": "object" }] },
+                    "nullable": { "type": ["string", "null"] },
+                    "count": { "type": ["integer", "null"] },
+                    "label": { "enum": ["a", "1"] },
+                    "id": { "oneOf": [{ "type": "integer" }, { "type": "object" }] }
+                }
+            }),
+        )],
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+    let script = tempdir.path().join("multi");
+    let cases = [
+        ("--body", "123", serde_json::json!("123")),
+        ("--body", "true", serde_json::json!("true")),
+        (
+            "--body",
+            "{\"type\":\"doc\"}",
+            serde_json::json!({ "type": "doc" }),
+        ),
+        ("--body", "[1]", serde_json::json!("[1]")),
+        ("--nullable", "123", serde_json::json!("123")),
+        ("--nullable", "null", serde_json::json!(null)),
+        ("--count", "5", serde_json::json!(5)),
+        ("--label", "1", serde_json::json!("1")),
+        ("--id", "7", serde_json::json!(7)),
+        ("--id", "{\"k\":1}", serde_json::json!({ "k": 1 })),
+        ("--id", "seven", serde_json::json!("seven")),
+    ];
+    for (flag, raw, expected) in cases {
+        let output = generated_script_output(&script, &["set", flag, raw]);
+        assert!(
+            output.status.success(),
+            "{flag} {raw}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let sent: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let key = flag.trim_start_matches("--");
+        assert_eq!(sent["input"][key], expected, "{flag} {raw}");
+    }
+}
+
+/// A bridge that answers `/health` at once but holds each `/exec` for `delay`.
+fn start_slow_bridge(delay: Duration) -> TestBridge {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(32) {
+            let mut stream = stream.unwrap();
+            thread::spawn(move || {
+                let request = read_http_request(&mut stream);
+                let body = if request.starts_with("GET /health") {
+                    "ok".to_string()
+                } else {
+                    thread::sleep(delay);
+                    serde_json::json!({ "result": "slow result" }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                let _ = std::io::Write::flush(&mut stream);
+                let _ = stream.shutdown(Shutdown::Write);
+            });
+        }
+    });
+    TestBridge {
+        url: format!("http://{addr}"),
+    }
+}
+
+#[test]
+fn generated_clients_apply_opt_in_request_timeout() {
+    let bridge = start_slow_bridge(Duration::from_secs(3));
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = GeneratorConfig {
+        cli_name: "slow".to_string(),
+        bridge_url: bridge.url.clone(),
+        token: "token".to_string(),
+        tools: vec![mcp_compressor_core::compression::engine::Tool::new(
+            "wait",
+            Some("Wait.".to_string()),
+            serde_json::json!({ "type": "object", "properties": {} }),
+        )],
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+    PythonGenerator.generate(&config).unwrap();
+    TypeScriptGenerator.generate(&config).unwrap();
+    let expected = "timed out after 0.5s waiting for the tool result (MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)";
+
+    let program = std::path::PathBuf::from(
+        generated_script_command(&tempdir.path().join("slow")).get_program(),
+    );
+    let output = Command::new(&program)
+        .arg("wait")
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+        expected
+    );
+
+    // Without the variable there is no client-side limit.
+    let output = Command::new(&program).arg("wait").output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "slow result"
+    );
+
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(format!(
+            "import sys; sys.path.insert(0, {dir:?}); import slow\n\
+             try:\n    slow.wait()\n\
+             except TimeoutError as error:\n    print(error)\n",
+            dir = tempdir.path().display().to_string()
+        ))
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+
+    let output = Command::new("bun")
+        .arg("--eval")
+        .arg(format!(
+            "import {{ wait }} from {module:?}; \
+             try {{ await wait(); }} catch (error) {{ console.log(error.message); }}",
+            module = tempdir.path().join("slow.ts").display().to_string()
+        ))
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
 }

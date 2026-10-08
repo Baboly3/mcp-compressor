@@ -275,7 +275,7 @@ describe("agent-facing alpha snapshots", () => {
         normalizePaths(typescript.tools.alpha_help?.description ?? "", { [tsDir]: "<ts-dir>" }),
       ).toBe(golden("agent-facing/code/alpha-typescript-help-tool-description.txt"));
 
-      expect(readFileSync(join(pythonDir, "alpha.py"), "utf8")).toContain('"""Echo a message."""');
+      expect(readFileSync(join(pythonDir, "alpha.py"), "utf8")).toContain('"""Echo a message.');
       expect(readFileSync(join(tsDir, "alpha.d.ts"), "utf8")).toContain("Echo a message.");
     } finally {
       python.close();
@@ -321,7 +321,7 @@ describe("agent-facing alpha snapshots", () => {
       const source = readFileSync(join(pythonDir, "atlassian.py"), "utf8");
       expect(source).toContain("def atlassian_user_info() -> str:");
       expect(source).toContain(
-        "def search_jira_issues_using_jql(cloud_id, jql, max_results=None, fields=None) -> str:",
+        "def search_jira_issues_using_jql(cloud_id: str, jql: str, max_results: float | None = None, fields: list | None = None) -> str:",
       );
       expect(source).toContain(JSON.stringify("cloudId") + ": cloud_id");
       expect(source).not.toContain("def atlassianUserInfo(");
@@ -552,3 +552,42 @@ async function runScriptResult(
     );
   });
 }
+
+describe("compressTools toonify option", () => {
+  const tools = {
+    structured: {
+      description: "Return rows.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => ({
+        rows: [
+          { id: 1, ok: true },
+          { id: 2, ok: false },
+        ],
+        total: 2,
+      }),
+    },
+    prose: {
+      description: "Return prose with commas.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => "Hello,world\nFoo,bar",
+    },
+  };
+  const invoke = (compressed: ReturnType<typeof compressTools>, name: string) =>
+    compressed.invoke_tool?.execute({ tool_name: name, tool_input: {} });
+
+  it("returns JSON by default", async () => {
+    const compressed = compressTools(tools);
+    await expect(invoke(compressed, "structured")).resolves.toBe(
+      '{"rows":[{"id":1,"ok":true},{"id":2,"ok":false}],"total":2}',
+    );
+  });
+
+  it("converts structured results to TOON when enabled", async () => {
+    const compressed = compressTools(tools, { toonify: true });
+    await expect(invoke(compressed, "structured")).resolves.toBe(
+      "rows[2]{id,ok}:\n  1,true\n  2,false\ntotal: 2",
+    );
+    // Two lines of comma-separated words are prose, not a one-row CSV table.
+    await expect(invoke(compressed, "prose")).resolves.toBe("Hello,world\nFoo,bar");
+  });
+});
