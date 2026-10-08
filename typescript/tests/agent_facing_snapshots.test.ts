@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -353,5 +353,82 @@ describe("agent-facing alpha snapshots", () => {
         tool_input: { message: "snapshot" },
       }),
     ).resolves.toBe(golden("agent-facing/compressed/alpha-invoke-echo.txt"));
+  });
+});
+
+// The host-owned bridge runs in this process, so invocations that reach it must
+// not block the event loop the way execFileSync does.
+async function runScriptAsync(scriptPath: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      scriptPath,
+      [...args],
+      { encoding: "utf8", shell: process.platform === "win32" },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`${error.message}\n${stderr}`));
+          return;
+        }
+        resolve(stdout.trimEnd().replace(/\r\n/g, "\n"));
+      },
+    );
+  });
+}
+
+describe("CLI and Just Bash output parity", () => {
+  // Outputs that a content-sniffing converter could mistake for structured data.
+  // Both surfaces must return them verbatim unless toonify is explicitly enabled.
+  const fidelityTools: Record<string, ExecutableTool<unknown>> = {
+    plain_text_with_commas: {
+      name: "plain_text_with_commas",
+      description: "Return prose that looks a bit like CSV.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => "Hello,world\nFoo,bar",
+    },
+    yaml_like_text: {
+      name: "yaml_like_text",
+      description: "Return prose with colons.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => "Note: this is prose\nStatus: not YAML",
+    },
+    json_text: {
+      name: "json_text",
+      description: "Return a JSON-looking string.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => '{"results": [1, 2, 3], "result": "inner"}',
+    },
+    structured: {
+      name: "structured",
+      description: "Return a structured object.",
+      inputSchema: { type: "object", properties: {} },
+      execute: async () => ({ rows: [{ id: 1, ok: true }], total: 1 }),
+    },
+  };
+
+  it("returns tool output verbatim and identically by default", async () => {
+    const outputDir = mkdtempSync(join(tmpdir(), "mcp-fidelity-cli-"));
+    const cli = await transformToolsForCliMode(fidelityTools, { serverName: "fid", outputDir });
+    const bash = new Bash({ customCommands: [] });
+    transformToolsForJustBash(fidelityTools, { serverName: "fid", bash });
+    try {
+      materializeFiles(outputDir, cli.files, ["fid"]);
+      const scriptPath = generatedScriptPath(outputDir, "fid");
+      const expected: Record<string, string> = {
+        "plain-text-with-commas": "Hello,world\nFoo,bar",
+        "yaml-like-text": "Note: this is prose\nStatus: not YAML",
+        "json-text": '{"results": [1, 2, 3], "result": "inner"}',
+        structured: '{"rows":[{"id":1,"ok":true}],"total":1}',
+      };
+      for (const [subcommand, output] of Object.entries(expected)) {
+        const viaBash = await bash.exec(`fid ${subcommand}`);
+        expect(viaBash.exitCode, subcommand).toBe(0);
+        expect(viaBash.stdout.trimEnd(), subcommand).toBe(output);
+        expect(await runScriptAsync(scriptPath, [subcommand]), subcommand).toBe(output);
+      }
+      const piped = await bash.exec("fid structured | jq -r '.rows[0].id'");
+      expect(piped.stdout.trim()).toBe("1");
+    } finally {
+      cli.close();
+    }
   });
 });

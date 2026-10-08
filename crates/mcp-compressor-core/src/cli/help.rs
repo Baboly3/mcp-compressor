@@ -22,10 +22,6 @@ use std::collections::HashSet;
 use crate::cli::mapping::tool_name_to_subcommand;
 use crate::compression::engine::Tool;
 
-/// The TOON-format note shown in every top-level help body.
-pub const TOON_NOTE: &str =
-    "When relevant, outputs from this CLI will prefer using the TOON format for more efficient representation of data.";
-
 /// Framing applied around the shared top-level help body. The body itself is
 /// always identical; only this prefix/footer may differ between the shell
 /// `--help` output and the `*_help` tool description.
@@ -67,13 +63,11 @@ impl HelpFraming {
 }
 
 /// Render the shared top-level help body (without framing): the toolset header,
-/// the TOON note, the USAGE line, and the SUBCOMMANDS listing with concise
+/// the USAGE line, and the SUBCOMMANDS listing with concise
 /// per-subcommand summaries.
 pub fn render_top_level_body(command: &str, cli_name: &str, tools: &[Tool]) -> String {
     let mut lines = vec![
         format!("{cli_name} - the {cli_name} toolset"),
-        String::new(),
-        TOON_NOTE.to_string(),
         String::new(),
         "USAGE:".to_string(),
         format!("  {command} <subcommand> [options]"),

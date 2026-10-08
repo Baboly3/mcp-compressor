@@ -99,9 +99,11 @@ describe("host-owned transform e2e", () => {
       'alpha summarize-payload --items one --items two --metadata \'{"source":"bash"}\' --no-include-details',
     );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("itemCount: 2");
-    expect(result.stdout).toContain("source: bash");
-    expect(result.stdout).toContain("includeDetails: false");
+    expect(JSON.parse(result.stdout)).toEqual({
+      itemCount: 2,
+      metadata: { source: "bash" },
+      includeDetails: false,
+    });
   });
 
   it("Just Bash transform can be planned before the Bash instance is available", async () => {
@@ -126,7 +128,7 @@ describe("host-owned transform e2e", () => {
 
     beforeInstall = await bash.exec("alpha summarize-payload --items one --items two");
     expect(beforeInstall.exitCode).toBe(0);
-    expect(beforeInstall.stdout).toContain("itemCount: 2");
+    expect(JSON.parse(beforeInstall.stdout)).toEqual({ itemCount: 2, includeDetails: true });
   });
 
   it("Python and TypeScript code transforms expose module/function descriptions", async () => {

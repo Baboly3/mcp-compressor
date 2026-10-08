@@ -1,7 +1,5 @@
 atlassian - the atlassian toolset
 
-When relevant, outputs from this CLI will prefer using the TOON format for more efficient representation of data.
-
 USAGE:
   atlassian <subcommand> [options]
 

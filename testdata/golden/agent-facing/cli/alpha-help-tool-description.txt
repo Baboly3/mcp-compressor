@@ -1,8 +1,6 @@
 Functionality associated with the alpha toolset is provided via the `alpha` CLI. Do not call this tool - use the CLI instead.
 alpha - the alpha toolset
 
-When relevant, outputs from this CLI will prefer using the TOON format for more efficient representation of data.
-
 USAGE:
   alpha <subcommand> [options]
 

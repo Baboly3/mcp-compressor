@@ -118,7 +118,7 @@ function buildProgram(options: { exitOverride?: boolean } = {}): Command {
       "--cli-mode",
       "Start in CLI mode: expose a single help MCP tool, start a local HTTP\n" +
         "bridge, and generate a shell script for interacting with the wrapped\n" +
-        "server via CLI. --toonify is automatically enabled in this mode.",
+        "server via CLI.",
     )
     .option(
       "--cli-port <port>",
@@ -128,8 +128,7 @@ function buildProgram(options: { exitOverride?: boolean } = {}): Command {
       "--just-bash",
       "Start in just-bash mode: expose a single 'bash' MCP tool powered by\n" +
         "just-bash, with all backend server tools available as custom commands.\n" +
-        "Requires the 'just-bash' package to be installed. --toonify is\n" +
-        "automatically enabled in this mode.",
+        "Requires the 'just-bash' package to be installed.",
     )
     .option(
       "--include-tool <tool>",
@@ -175,7 +174,7 @@ function parseCliArgsWithOptions(
   const backend = parseBackendArg(program.args);
   const justBash = parsedOptions.justBash ?? false;
   const cliMode = parsedOptions.cliMode ?? false;
-  const toonify = (parsedOptions.toonify ?? false) || cliMode || justBash;
+  const toonify = parsedOptions.toonify ?? false;
 
   return {
     backend,

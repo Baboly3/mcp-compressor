@@ -17,11 +17,18 @@ export interface TransformToolOptions {
   serverName?: string;
 }
 
-export interface TransformToolsForJustBashOptions extends TransformToolOptions {
-  bash: unknown;
+export interface PlanToolsForJustBashOptions extends TransformToolOptions {
+  /**
+   * Convert JSON/CSV/YAML tool results to TOON before writing them to stdout.
+   * Defaults to ``false`` so Just Bash output matches the generated CLI byte for
+   * byte (and stays pipeable into tools such as ``jq``).
+   */
+  toonify?: boolean;
 }
 
-export interface PlanToolsForJustBashOptions extends TransformToolOptions {}
+export interface TransformToolsForJustBashOptions extends PlanToolsForJustBashOptions {
+  bash: unknown;
+}
 
 export interface JustBashTransformResult {
   tools: Record<string, ExecutableTool>;
@@ -58,7 +65,13 @@ export function planToolsForJustBash(
   const plan = buildHostTransformPlan({ kind: "just-bash", serverName, tools: toolSpecs });
   const registrations = createJustBashCommandRegistrations(
     (plan.justBash?.commands ?? []).map((command) =>
-      justBashSource(serverName, command.commandName, command.backendToolName, tools),
+      justBashSource(
+        serverName,
+        command.commandName,
+        command.backendToolName,
+        tools,
+        options.toonify ?? false,
+      ),
     ),
   );
   return {
@@ -110,6 +123,7 @@ function justBashSource(
   commandName: string,
   backendToolName: string,
   tools: Record<string, ExecutableTool<unknown>>,
+  toonify: boolean,
 ): JustBashCommandSource {
   const tool = tools[backendToolName];
   if (tool === undefined) {
@@ -121,7 +135,7 @@ function justBashSource(
     backendToolName,
     helpToolName: `${serverName}_help`,
     tool: executableToolToSpec(backendToolName, tool),
-    invoke: async (input) => normalizeHostToolResult(await tool.execute(input), true),
+    invoke: async (input) => normalizeHostToolResult(await tool.execute(input), toonify),
   };
 }
 
