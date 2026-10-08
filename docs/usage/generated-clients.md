@@ -241,6 +241,10 @@ Error messages name the flag the agent typed, such as `--page-id`, not the schem
 
 In Code Mode, a tool failure raises `RuntimeError` in Python and rejects with an `Error` in TypeScript. Either way the message is the tool's own error text.
 
+### Timeouts
+
+Generated clients don't set a request timeout of their own. A call waits as long as the proxy does, and the proxy applies the backend `--timeout` you configured. To cap a single client's wait, set `MCP_COMPRESSOR_REQUEST_TIMEOUT` to a number of seconds in its environment. When the cap is hit, the CLI exits `1`, Python raises `TimeoutError`, and TypeScript rejects with an `Error`. The message is `timed out after <n>s waiting for the tool result`.
+
 ## How an agent might use Code Mode
 
 A Python-capable agent can inspect the generated module or use normal autocomplete/static analysis:

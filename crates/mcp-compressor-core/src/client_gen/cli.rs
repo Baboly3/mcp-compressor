@@ -83,7 +83,7 @@ fn client_python_body(config: &GeneratorConfig) -> String {
     let subcommands = serde_json::Value::Object(subcommand_map).to_string();
     let subcommand_help = serde_json::Value::Object(subcommand_help_map).to_string();
     format!(
-        r#"import base64, json, math, os, re, sys, urllib.error, urllib.request
+        r#"import base64, json, math, os, re, socket, sys, urllib.error, urllib.request
 
 CLI_NAME = {cli_name}
 
@@ -408,6 +408,22 @@ def usage_failure(error, help_command):
     print(f"Run '{{help_command}} --help' for usage.", file=sys.stderr)
     return 2
 
+def request_timeout():
+    # No client-side limit by default: the proxy enforces the backend's
+    # --timeout, and a shorter limit here would cut off slow tools early.
+    raw = os.environ.get("MCP_COMPRESSOR_REQUEST_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+def timeout_message(timeout):
+    return (
+        f"timed out after {{timeout:g}}s waiting for the tool result "
+        "(MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)"
+    )
+
 def bridge_error_message(status, body):
     try:
         parsed = json.loads(body)
@@ -461,13 +477,20 @@ def main():
         headers={{"Content-Type": "application/json", "Authorization": "Bearer " + token}},
         method="POST",
     )
+    timeout = request_timeout()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             sys.stdout.write(unwrap_proxy_response(resp.read().decode()))
     except urllib.error.HTTPError as exc:
         print(bridge_error_message(exc.code, exc.read().decode(errors="replace")), file=sys.stderr)
         return 1
+    except (socket.timeout, TimeoutError):
+        print(timeout_message(timeout), file=sys.stderr)
+        return 1
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+            print(timeout_message(timeout), file=sys.stderr)
+            return 1
         print(
             "mcp-compressor proxy is not running; restart the mcp-compressor CLI-mode process and try again.",
             file=sys.stderr,

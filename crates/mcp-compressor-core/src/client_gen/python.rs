@@ -36,6 +36,9 @@ fn render_python_module(config: &GeneratorConfig) -> String {
 from __future__ import annotations
 
 import json as _json
+import math as _math
+import os as _os
+import socket as _socket
 import urllib.error as _urllib_error
 import urllib.request as _urllib_request
 
@@ -58,14 +61,34 @@ def _unwrap_proxy_response(body: str) -> str:
     return body
 
 
+def _request_timeout() -> float | None:
+    # No client-side limit by default: the proxy enforces the backend's
+    # --timeout, and a shorter limit here would cut off slow tools early.
+    try:
+        value = float(_os.environ.get("MCP_COMPRESSOR_REQUEST_TIMEOUT", ""))
+    except ValueError:
+        return None
+    return value if _math.isfinite(value) and value > 0 else None
+
+
+def _timeout_message(timeout: float | None) -> str:
+    return (
+        f"timed out after {{timeout:g}}s waiting for the tool result "
+        "(MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)"
+    )
+
+
 def _exec(tool: str, tool_input: dict) -> str:
     # Omitted optional arguments are None; leave them out like the CLI and TS clients do.
     tool_input = {{key: value for key, value in tool_input.items() if value is not None}}
     payload = _json.dumps({{"tool": tool, "input": tool_input}}).encode()
     request = _urllib_request.Request(_BRIDGE + "/exec", data=payload, headers=_HEADERS, method="POST")
+    timeout = _request_timeout()
     try:
-        with _urllib_request.urlopen(request) as response:
+        with _urllib_request.urlopen(request, timeout=timeout) as response:
             return _unwrap_proxy_response(response.read().decode())
+    except (_socket.timeout, TimeoutError):
+        raise TimeoutError(_timeout_message(timeout)) from None
     except _urllib_error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
         try:
@@ -79,6 +102,8 @@ def _exec(tool: str, tool_input: dict) -> str:
         ) from None
     except OSError as exc:
         details = getattr(exc, "reason", exc)
+        if isinstance(details, (_socket.timeout, TimeoutError)):
+            raise TimeoutError(_timeout_message(timeout)) from None
         raise RuntimeError(
             "mcp-compressor proxy is not running; restart the mcp-compressor process and try again. "
             f"details: {{details}}"
@@ -147,6 +172,9 @@ const PYTHON_RESERVED: &[&str] = &[
     "with",
     "yield",
     "_json",
+    "_math",
+    "_os",
+    "_socket",
     "_urllib_error",
     "_urllib_request",
     "_BRIDGE",
@@ -155,6 +183,8 @@ const PYTHON_RESERVED: &[&str] = &[
     "_HEADERS",
     "_unwrap_proxy_response",
     "_exec",
+    "_request_timeout",
+    "_timeout_message",
 ];
 
 fn python_identifier(name: &str) -> String {

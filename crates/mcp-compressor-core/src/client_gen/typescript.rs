@@ -39,18 +39,32 @@ const TOKEN = {token:?};
 const SESSION_PID = {pid};
 const HEADERS = {{ Authorization: `Bearer ${{TOKEN}}`, "Content-Type": "application/json" }};
 
+// No client-side limit by default: the proxy enforces the backend's
+// --timeout, and a shorter limit here would cut off slow tools early.
+function requestTimeoutSeconds(): number | undefined {{
+  const raw = (globalThis as {{ process?: {{ env?: Record<string, string | undefined> }} }}).process?.env?.MCP_COMPRESSOR_REQUEST_TIMEOUT;
+  const value = Number(raw);
+  return raw && Number.isFinite(value) && value > 0 ? value : undefined;
+}}
+
 async function execTool(tool: string, input: Record<string, unknown>): Promise<string> {{
+  const timeout = requestTimeoutSeconds();
   let res: Response;
+  let body: string;
   try {{
     res = await globalThis.fetch(`${{BRIDGE}}/exec`, {{
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({{ tool, input }}),
+      signal: timeout === undefined ? undefined : AbortSignal.timeout(timeout * 1000),
     }});
+    body = await res.text();
   }} catch (error) {{
+    if (error instanceof Error && error.name === "TimeoutError") {{
+      throw new Error(`timed out after ${{timeout}}s waiting for the tool result (MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)`);
+    }}
     throw new Error(`mcp-compressor proxy is not running; restart the mcp-compressor process and try again. details: ${{error instanceof Error ? error.message : String(error)}}`);
   }}
-  const body = await res.text();
   if (!res.ok) {{
     throw new Error(bridgeErrorMessage(res.status, body));
   }}
@@ -250,6 +264,7 @@ const TS_RESERVED: &[&str] = &[
     "execTool",
     "unwrapProxyResponse",
     "bridgeErrorMessage",
+    "requestTimeoutSeconds",
 ];
 
 fn ts_identifier(name: &str) -> String {

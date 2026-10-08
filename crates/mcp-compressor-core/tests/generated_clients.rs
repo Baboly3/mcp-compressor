@@ -1337,3 +1337,118 @@ fn generated_cli_decodes_json_only_into_accepted_types() {
         assert_eq!(sent["input"][key], expected, "{flag} {raw}");
     }
 }
+
+/// A bridge that answers `/health` at once but holds each `/exec` for `delay`.
+fn start_slow_bridge(delay: Duration) -> TestBridge {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(32) {
+            let mut stream = stream.unwrap();
+            thread::spawn(move || {
+                let request = read_http_request(&mut stream);
+                let body = if request.starts_with("GET /health") {
+                    "ok".to_string()
+                } else {
+                    thread::sleep(delay);
+                    serde_json::json!({ "result": "slow result" }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                let _ = std::io::Write::flush(&mut stream);
+                let _ = stream.shutdown(Shutdown::Write);
+            });
+        }
+    });
+    TestBridge {
+        url: format!("http://{addr}"),
+    }
+}
+
+#[test]
+fn generated_clients_apply_opt_in_request_timeout() {
+    let bridge = start_slow_bridge(Duration::from_secs(3));
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = GeneratorConfig {
+        cli_name: "slow".to_string(),
+        bridge_url: bridge.url.clone(),
+        token: "token".to_string(),
+        tools: vec![mcp_compressor_core::compression::engine::Tool::new(
+            "wait",
+            Some("Wait.".to_string()),
+            serde_json::json!({ "type": "object", "properties": {} }),
+        )],
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+    PythonGenerator.generate(&config).unwrap();
+    TypeScriptGenerator.generate(&config).unwrap();
+    let expected = "timed out after 0.5s waiting for the tool result (MCP_COMPRESSOR_REQUEST_TIMEOUT sets this limit)";
+
+    let program = std::path::PathBuf::from(
+        generated_script_command(&tempdir.path().join("slow")).get_program(),
+    );
+    let output = Command::new(&program)
+        .arg("wait")
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+        expected
+    );
+
+    // Without the variable there is no client-side limit.
+    let output = Command::new(&program).arg("wait").output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "slow result"
+    );
+
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(format!(
+            "import sys; sys.path.insert(0, {dir:?}); import slow\n\
+             try:\n    slow.wait()\n\
+             except TimeoutError as error:\n    print(error)\n",
+            dir = tempdir.path().display().to_string()
+        ))
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+
+    let output = Command::new("bun")
+        .arg("--eval")
+        .arg(format!(
+            "import {{ wait }} from {module:?}; \
+             try {{ await wait(); }} catch (error) {{ console.log(error.message); }}",
+            module = tempdir.path().join("slow.ts").display().to_string()
+        ))
+        .env("MCP_COMPRESSOR_REQUEST_TIMEOUT", "0.5")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+}
