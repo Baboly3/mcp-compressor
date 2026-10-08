@@ -203,7 +203,87 @@ fn coerce_value(
             coerce_value(flag, item_schema, raw_value, None)
         }
         Some("object") => coerce_object(flag, raw_value),
-        _ => coerce_json_or_string(raw_value),
+        _ => Ok(coerce_untyped(schema, raw_value.unwrap_or_default())),
+    }
+}
+
+/// JSON types a schema without a single `type` accepts, or `None` for any.
+///
+/// Looks through `type` lists, `anyOf`/`oneOf` variants, and `enum`/`const`
+/// literals. A variant with no recognizable type makes the whole set `None`.
+fn allowed_json_types(schema: &Value) -> Option<Vec<String>> {
+    match schema.get("type") {
+        Some(Value::String(ty)) => return Some(vec![ty.clone()]),
+        Some(Value::Array(types)) => {
+            return Some(
+                types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+            )
+        }
+        _ => {}
+    }
+    if let Some(Value::Array(values)) = schema.get("enum") {
+        return Some(
+            values
+                .iter()
+                .map(|value| json_type_name(value).to_string())
+                .collect(),
+        );
+    }
+    if let Some(value) = schema.get("const") {
+        return Some(vec![json_type_name(value).to_string()]);
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(variants)) = schema.get(key) {
+            let mut allowed = Vec::new();
+            for variant in variants {
+                allowed.extend(allowed_json_types(variant)?);
+            }
+            return Some(allowed);
+        }
+    }
+    None
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn type_allowed(allowed: &[String], value: &Value) -> bool {
+    let ty = json_type_name(value);
+    allowed
+        .iter()
+        .any(|candidate| candidate == ty || (candidate == "number" && ty == "integer"))
+}
+
+/// Coerce a value whose schema has no single `type` (`anyOf`, `["string",
+/// "null"]`, untyped enums, or nothing at all).
+///
+/// The value is decoded as JSON when that yields a type the schema accepts.
+/// Otherwise, if strings are accepted, the raw text is sent as-is, so
+/// `--description 123` stays `"123"` for a string-or-object property.
+/// Anything else is passed through leniently for the server to validate.
+fn coerce_untyped(schema: &Value, raw: &str) -> Value {
+    let decoded = serde_json::from_str::<Value>(raw).ok();
+    let Some(allowed) = allowed_json_types(schema) else {
+        return decoded.unwrap_or_else(|| Value::String(raw.to_string()));
+    };
+    match decoded {
+        Some(value) if type_allowed(&allowed, &value) => value,
+        _ if allowed.iter().any(|ty| ty == "string") => Value::String(raw.to_string()),
+        Some(value) => value,
+        None => Value::String(raw.to_string()),
     }
 }
 
@@ -215,11 +295,6 @@ fn coerce_object(flag: &str, raw_value: Option<&str>) -> Result<Value, Error> {
             "invalid JSON object for {flag}: {raw}"
         ))),
     }
-}
-
-fn coerce_json_or_string(raw_value: Option<&str>) -> Result<Value, Error> {
-    let raw = raw_value.unwrap_or_default();
-    Ok(serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string())))
 }
 
 /// Enforce JSON Schema `enum` constraints. Mirrors the validation performed by
@@ -578,6 +653,41 @@ mod tests {
             parse_argv(&args(&["--value", "x"]), &tool).unwrap(),
             json!({ "value": "x" })
         );
+    }
+
+    /// Without a single `type`, JSON is decoded only into a type the schema
+    /// accepts; text stays text when strings are allowed.
+    #[test]
+    fn multi_type_args_decode_json_only_into_accepted_types() {
+        let tool = tool_with_schema(json!({
+            "type": "object",
+            "properties": {
+                "body": { "anyOf": [{ "type": "string" }, { "type": "object" }] },
+                "nullable": { "type": ["string", "null"] },
+                "count": { "type": ["integer", "null"] },
+                "label": { "enum": ["a", "1"] },
+                "id": { "oneOf": [{ "type": "integer" }, { "type": "object" }] }
+            }
+        }));
+        let cases = [
+            ("--body", "123", json!("123")),
+            ("--body", "true", json!("true")),
+            ("--body", "{\"type\":\"doc\"}", json!({ "type": "doc" })),
+            ("--body", "[1]", json!("[1]")),
+            ("--nullable", "123", json!("123")),
+            ("--nullable", "null", json!(null)),
+            ("--count", "5", json!(5)),
+            ("--label", "1", json!("1")),
+            ("--id", "7", json!(7)),
+            ("--id", "{\"k\":1}", json!({ "k": 1 })),
+            // Nothing accepts a string, so pass through for the server to reject.
+            ("--id", "seven", json!("seven")),
+        ];
+        for (flag, raw, expected) in cases {
+            let parsed = parse_argv(&args(&[flag, raw]), &tool).unwrap();
+            let key = flag.trim_start_matches("--");
+            assert_eq!(parsed[key], expected, "{flag} {raw}");
+        }
     }
 
     /// Errors name the flag the way the user typed it or `--help` shows it.

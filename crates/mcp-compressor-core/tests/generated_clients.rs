@@ -918,7 +918,7 @@ fn start_echo_bridge() -> TestBridge {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
-        for stream in listener.incoming().take(16) {
+        for stream in listener.incoming().take(64) {
             let mut stream = stream.unwrap();
             let request = read_http_request(&mut stream);
             let body = if request.starts_with("GET /health") {
@@ -1276,4 +1276,64 @@ async fn generated_clients_surface_backend_tool_errors() {
         String::from_utf8_lossy(&output.stdout).trim(),
         "fixture tool error"
     );
+}
+
+/// The generated CLI's embedded parser must coerce multi-type properties
+/// exactly like the Rust parser (`multi_type_args_decode_json_only_into_accepted_types`).
+#[test]
+fn generated_cli_decodes_json_only_into_accepted_types() {
+    let bridge = start_echo_bridge();
+    let tempdir = tempfile::tempdir().unwrap();
+    let config = GeneratorConfig {
+        cli_name: "multi".to_string(),
+        bridge_url: bridge.url.clone(),
+        token: "token".to_string(),
+        tools: vec![mcp_compressor_core::compression::engine::Tool::new(
+            "set",
+            Some("Set values.".to_string()),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "body": { "anyOf": [{ "type": "string" }, { "type": "object" }] },
+                    "nullable": { "type": ["string", "null"] },
+                    "count": { "type": ["integer", "null"] },
+                    "label": { "enum": ["a", "1"] },
+                    "id": { "oneOf": [{ "type": "integer" }, { "type": "object" }] }
+                }
+            }),
+        )],
+        session_pid: std::process::id(),
+        output_dir: tempdir.path().to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+    let script = tempdir.path().join("multi");
+    let cases = [
+        ("--body", "123", serde_json::json!("123")),
+        ("--body", "true", serde_json::json!("true")),
+        (
+            "--body",
+            "{\"type\":\"doc\"}",
+            serde_json::json!({ "type": "doc" }),
+        ),
+        ("--body", "[1]", serde_json::json!("[1]")),
+        ("--nullable", "123", serde_json::json!("123")),
+        ("--nullable", "null", serde_json::json!(null)),
+        ("--count", "5", serde_json::json!(5)),
+        ("--label", "1", serde_json::json!("1")),
+        ("--id", "7", serde_json::json!(7)),
+        ("--id", "{\"k\":1}", serde_json::json!({ "k": 1 })),
+        ("--id", "seven", serde_json::json!("seven")),
+    ];
+    for (flag, raw, expected) in cases {
+        let output = generated_script_output(&script, &["set", flag, raw]);
+        assert!(
+            output.status.success(),
+            "{flag} {raw}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let sent: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let key = flag.trim_start_matches("--");
+        assert_eq!(sent["input"][key], expected, "{flag} {raw}");
+    }
 }
