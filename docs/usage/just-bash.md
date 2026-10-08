@@ -80,6 +80,10 @@ alpha_echo
 beta_echo
 ```
 
+## Errors
+
+Commands follow the same argument and error rules as generated CLIs: usage errors exit `2` with a pointer to `--help`, and tool failures exit `1` with the tool's message on stderr. See [Arguments and errors](generated-clients.md#arguments-and-errors).
+
 ## Lifecycle
 
 Generated commands call the active `mcp-compressor` session or the local tool functions you provided. Keep that session or host application alive for as long as the agent needs to run the commands.

@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,9 +18,9 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use crate::Error;
 use crate::proxy::auth::SessionToken;
 use crate::server::compressed::CompressedServer;
+use crate::Error;
 
 #[derive(Debug)]
 pub struct ToolProxyServer;
@@ -174,8 +174,25 @@ async fn exec(
 
     match result {
         Ok(result) => close_response(StatusCode::OK, result),
-        Err(error) => close_response(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => error_response(&error),
     }
+}
+
+/// Report a failed `/exec` as `{"error": message}`, the shape generated
+/// clients and host bridges share. Tool failures are 500s (the request was
+/// fine, the tool was not); anything else is a bad request.
+fn error_response(error: &Error) -> Response {
+    let status = match error {
+        Error::ToolExecution(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let body = serde_json::json!({ "error": error.to_string() }).to_string();
+    let mut response = close_response(status, body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 fn close_response(status: StatusCode, body: impl Into<String>) -> Response {

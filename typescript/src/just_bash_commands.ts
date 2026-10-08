@@ -67,15 +67,20 @@ export function createJustBashCommandRegistrations(
           }
           const source = bySubcommand.get(subcommand);
           if (source === undefined) {
-            throw new Error(`Unknown ${providerName} subcommand: ${subcommand}`);
+            return usageFailure(`parse error: unknown subcommand: ${subcommand}`, providerName);
           }
           // Per-subcommand help must match the generated CLI's rich `--help`
           // output, so render it from the shared Rust renderer.
           if (toolArgs.includes("--help") || toolArgs.includes("-h")) {
             return output(renderCliSubcommandHelp(providerName, source.tool));
           }
-          const parsedInput = parseToolArgv(source.tool, toolArgs);
-          const toolInput = normalizeStructuredArgValues(source.tool.inputSchema, parsedInput);
+          let toolInput: Record<string, unknown>;
+          try {
+            const parsedInput = parseToolArgv(source.tool, toolArgs);
+            toolInput = normalizeStructuredArgValues(source.tool.inputSchema, parsedInput);
+          } catch (error) {
+            return usageFailure(errorMessage(error), `${providerName} ${subcommand}`);
+          }
           return output(await source.invoke(toolInput));
         } catch (error) {
           return failure(error);
@@ -107,7 +112,23 @@ function output(stdout: string): ExecResult {
   return { stdout: `${stdout}\n`, stderr: "", exitCode: 0 };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A failed tool call: the tool's own message, exit 1. */
 function failure(error: unknown): ExecResult {
-  const message = error instanceof Error ? error.message : String(error);
-  return { stdout: "", stderr: `${message}\n`, exitCode: 1 };
+  return { stdout: "", stderr: `${errorMessage(error)}\n`, exitCode: 1 };
+}
+
+/**
+ * A malformed invocation, reported exactly like the generated CLI script:
+ * the parser's message, a pointer to `--help`, and exit 2.
+ */
+function usageFailure(message: string, helpCommand: string): ExecResult {
+  return {
+    stdout: "",
+    stderr: `${message}\nRun '${helpCommand} --help' for usage.\n`,
+    exitCode: 2,
+  };
 }

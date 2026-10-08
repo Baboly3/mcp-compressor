@@ -107,3 +107,52 @@ async fn proxy_exec_dispatches_to_real_backend_with_session_token() {
     assert!((200..300).contains(&response.status));
     assert_eq!(response.body.trim(), "alpha:hello");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_exec_reports_tool_and_request_errors_as_json() {
+    let compressed = CompressedServer::connect_stdio(
+        common::max_config(Some("alpha")),
+        common::backend("alpha", "alpha_server.py"),
+    )
+    .await
+    .unwrap();
+    let proxy = ToolProxyServer::start(compressed).await.unwrap();
+
+    // A backend tool that returns `isError: true` is a 500 carrying the
+    // tool's own message, never a 200 with the error text as the result.
+    let tool_error = json!({
+        "tool": "alpha_invoke_tool",
+        "input": { "tool_name": "tool_error", "tool_input": {} }
+    })
+    .to_string();
+    let response = send_raw_http(
+        "POST",
+        &proxy.exec_url(),
+        Some(proxy.token_value()),
+        Some(&tool_error),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(body, json!({ "error": "fixture tool error" }));
+
+    // An unknown backend tool is a bad request with a JSON error body.
+    let unknown = json!({
+        "tool": "alpha_invoke_tool",
+        "input": { "tool_name": "no_such_tool", "tool_input": {} }
+    })
+    .to_string();
+    let response = send_raw_http(
+        "POST",
+        &proxy.exec_url(),
+        Some(proxy.token_value()),
+        Some(&unknown),
+    );
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("no_such_tool")),
+        "body: {body}"
+    );
+}

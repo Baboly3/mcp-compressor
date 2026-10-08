@@ -8,21 +8,27 @@
 //!
 //! | Syntax | Produces |
 //! |---|---|
-//! | `--flag value` | `{"flag": "value"}` (string) |
+//! | `--flag value` | `{"flag": "value"}` (string props are never JSON-decoded) |
 //! | `--flag` | `{"flag": true}` (boolean) |
 //! | `--no-flag` | `{"flag": false}` (boolean) |
 //! | `--flag true` / `--flag false` | explicit bool |
 //! | `--flag 5` (integer prop) | `{"flag": 5}` |
 //! | `--flag 0.5` (number prop) | `{"flag": 0.5}` |
 //! | `--tag a --tag b` (array prop) | `{"tag": ["a","b"]}` |
+//! | `--filter '{"k":1}'` (object prop) | `{"filter": {"k": 1}}` (must be a JSON object) |
 //! | `--json '{"k":"v"}'` | `{"k": "v"}` (raw JSON escape-hatch) |
 //! | `--page-id 123` (kebab flag) | `{"page_id": "123"}` (snake prop) |
 //!
 //! Unknown flags and positional arguments are errors.
 //! Missing required arguments are errors.
+//!
+//! Error messages name the flag as the user typed it (or, for missing
+//! arguments, as `--help` renders it). The generated CLI script's embedded
+//! parser produces the same messages; `client_gen::cli` tests pin both.
 
 use serde_json::{Map, Number, Value};
 
+use crate::cli::mapping::tool_name_to_subcommand;
 use crate::compression::engine::Tool;
 use crate::Error;
 
@@ -41,7 +47,12 @@ pub fn parse_argv(argv: &[String], tool: &Tool) -> Result<serde_json::Value, Err
                 "--json cannot be combined with other arguments".to_string(),
             ));
         }
-        return Ok(serde_json::from_str(json)?);
+        return match serde_json::from_str::<Value>(json) {
+            Ok(value @ Value::Object(_)) => Ok(value),
+            _ => Err(Error::Parse(format!(
+                "invalid JSON object for --json: {json}"
+            ))),
+        };
     }
 
     let properties = schema_properties(tool);
@@ -85,7 +96,7 @@ pub fn parse_argv(argv: &[String], tool: &Tool) -> Result<serde_json::Value, Err
             (Some(value.as_str()), 2)
         };
 
-        let value = coerce_value(&property_name, schema, raw_value, forced_bool)?;
+        let value = coerce_value(arg, schema, raw_value, forced_bool)?;
         validate_enum(arg, schema, &value)?;
         insert_value(&mut output, &property_name, schema, value);
         index += consumed;
@@ -94,7 +105,8 @@ pub fn parse_argv(argv: &[String], tool: &Tool) -> Result<serde_json::Value, Err
     for property in required {
         if !output.contains_key(&property) {
             return Err(Error::Validation(format!(
-                "missing required argument: {property}"
+                "missing required argument: --{}",
+                tool_name_to_subcommand(&property)
             )));
         }
     }
@@ -168,7 +180,7 @@ fn array_item_schema(schema: &Value) -> Option<&Value> {
 }
 
 fn coerce_value(
-    property_name: &str,
+    flag: &str,
     schema: &Value,
     raw_value: Option<&str>,
     forced_bool: Option<bool>,
@@ -178,19 +190,30 @@ fn coerce_value(
     }
 
     match schema_type(schema) {
-        Some("boolean") => coerce_bool(property_name, raw_value),
-        Some("integer") => coerce_integer(property_name, raw_value),
-        Some("number") => coerce_number(property_name, raw_value),
+        Some("boolean") => coerce_bool(flag, raw_value),
+        Some("integer") => coerce_integer(flag, raw_value),
+        Some("number") => coerce_number(flag, raw_value),
+        Some("string") => Ok(Value::String(raw_value.unwrap_or_default().to_string())),
         Some("array") => {
             let raw = raw_value.unwrap_or_default();
             if let Ok(Value::Array(values)) = serde_json::from_str::<Value>(raw) {
                 return Ok(Value::Array(values));
             }
             let item_schema = array_item_schema(schema).unwrap_or(&Value::Null);
-            coerce_value(property_name, item_schema, raw_value, None)
+            coerce_value(flag, item_schema, raw_value, None)
         }
-        Some("object") => coerce_json_or_string(raw_value),
+        Some("object") => coerce_object(flag, raw_value),
         _ => coerce_json_or_string(raw_value),
+    }
+}
+
+fn coerce_object(flag: &str, raw_value: Option<&str>) -> Result<Value, Error> {
+    let raw = raw_value.unwrap_or_default();
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value @ Value::Object(_)) => Ok(value),
+        _ => Err(Error::Parse(format!(
+            "invalid JSON object for {flag}: {raw}"
+        ))),
     }
 }
 
@@ -244,37 +267,32 @@ fn json_scalar_label(value: &Value) -> String {
     }
 }
 
-fn coerce_bool(property_name: &str, raw_value: Option<&str>) -> Result<Value, Error> {
+fn coerce_bool(flag: &str, raw_value: Option<&str>) -> Result<Value, Error> {
     match raw_value {
         None => Ok(Value::Bool(true)),
         Some("true") => Ok(Value::Bool(true)),
         Some("false") => Ok(Value::Bool(false)),
         Some(value) => Err(Error::Parse(format!(
-            "invalid boolean value for {property_name}: {value}"
+            "invalid boolean value for {flag}: {value} (expected true or false)"
         ))),
     }
 }
 
-fn coerce_integer(property_name: &str, raw_value: Option<&str>) -> Result<Value, Error> {
-    let value =
-        raw_value.ok_or_else(|| Error::Parse(format!("{property_name} requires a value")))?;
-    let parsed = value.parse::<i64>().map_err(|_| {
-        Error::Parse(format!(
-            "invalid integer value for {property_name}: {value}"
-        ))
-    })?;
+fn coerce_integer(flag: &str, raw_value: Option<&str>) -> Result<Value, Error> {
+    let value = raw_value.ok_or_else(|| Error::Parse(format!("{flag} requires a value")))?;
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| Error::Parse(format!("invalid integer value for {flag}: {value}")))?;
     Ok(Value::Number(Number::from(parsed)))
 }
 
-fn coerce_number(property_name: &str, raw_value: Option<&str>) -> Result<Value, Error> {
-    let value =
-        raw_value.ok_or_else(|| Error::Parse(format!("{property_name} requires a value")))?;
+fn coerce_number(flag: &str, raw_value: Option<&str>) -> Result<Value, Error> {
+    let value = raw_value.ok_or_else(|| Error::Parse(format!("{flag} requires a value")))?;
     let parsed = value
         .parse::<f64>()
-        .map_err(|_| Error::Parse(format!("invalid number value for {property_name}: {value}")))?;
-    let number = Number::from_f64(parsed).ok_or_else(|| {
-        Error::Parse(format!("invalid number value for {property_name}: {value}"))
-    })?;
+        .map_err(|_| Error::Parse(format!("invalid number value for {flag}: {value}")))?;
+    let number = Number::from_f64(parsed)
+        .ok_or_else(|| Error::Parse(format!("invalid number value for {flag}: {value}")))?;
     Ok(Value::Number(number))
 }
 
@@ -510,15 +528,76 @@ mod tests {
         assert_eq!(result, json!({ "metadata": { "ok": true } }));
     }
 
-    /// Complex values fall back to strings when JSON parsing fails.
+    /// Object properties must receive a JSON object; anything else is a parse
+    /// error naming the flag, rather than a string the backend will reject.
     #[test]
-    fn object_arg_invalid_json_falls_back_to_string() {
+    fn object_arg_rejects_non_object_json() {
         let tool = tool_with_schema(json!({
             "type": "object",
             "properties": { "metadata": { "type": "object" } }
         }));
-        let result = parse_argv(&args(&["--metadata", "not-json"]), &tool).unwrap();
-        assert_eq!(result, json!({ "metadata": "not-json" }));
+        for raw in ["not-json", "{bad", "[1]", "3"] {
+            let error = parse_argv(&args(&["--metadata", raw]), &tool).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("parse error: invalid JSON object for --metadata: {raw}")
+            );
+        }
+    }
+
+    /// String properties keep the raw text, even when it looks like JSON.
+    #[test]
+    fn string_arg_is_never_json_decoded() {
+        let tool = tool_with_schema(json!({
+            "type": "object",
+            "properties": { "page_id": { "type": "string" }, "items": { "type": "array", "items": { "type": "string" } } }
+        }));
+        let result = parse_argv(
+            &args(&["--page-id", "123", "--items", "true", "--items", "null"]),
+            &tool,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({ "page_id": "123", "items": ["true", "null"] })
+        );
+    }
+
+    /// Untyped properties stay lenient: JSON when it parses, otherwise text.
+    #[test]
+    fn untyped_arg_accepts_json_or_text() {
+        let tool = tool_with_schema(json!({
+            "type": "object",
+            "properties": { "value": {} }
+        }));
+        assert_eq!(
+            parse_argv(&args(&["--value", "5"]), &tool).unwrap(),
+            json!({ "value": 5 })
+        );
+        assert_eq!(
+            parse_argv(&args(&["--value", "x"]), &tool).unwrap(),
+            json!({ "value": "x" })
+        );
+    }
+
+    /// Errors name the flag the way the user typed it or `--help` shows it.
+    #[test]
+    fn errors_name_flags_not_properties() {
+        let tool = tool_with_schema(json!({
+            "type": "object",
+            "properties": { "maxResults": { "type": "integer" }, "page_id": { "type": "string" } },
+            "required": ["page_id"]
+        }));
+        let error = parse_argv(&args(&["--max-results", "many"]), &tool).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "parse error: invalid integer value for --max-results: many"
+        );
+        let error = parse_argv(&args(&["--max-results", "1"]), &tool).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "validation error: missing required argument: --page-id"
+        );
     }
 
     /// A single-element array works correctly.
@@ -645,12 +724,18 @@ mod tests {
         assert!(parse_argv(&args(&["--json"]), &tool).is_err());
     }
 
-    /// `--json` accepts a JSON array (not just objects).
+    /// `--json` must be a JSON object: MCP tool arguments are always objects,
+    /// and anything else used to be dropped silently before reaching the tool.
     #[test]
-    fn json_escape_hatch_array() {
+    fn json_escape_hatch_rejects_non_objects() {
         let tool = tool_with_schema(json!({ "type": "object", "properties": {} }));
-        let result = parse_argv(&args(&["--json", "[1,2,3]"]), &tool).unwrap();
-        assert_eq!(result, json!([1, 2, 3]));
+        for raw in ["[1,2,3]", "3", "{bad"] {
+            let error = parse_argv(&args(&["--json", raw]), &tool).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("parse error: invalid JSON object for --json: {raw}")
+            );
+        }
     }
 
     // ------------------------------------------------------------------
