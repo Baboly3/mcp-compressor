@@ -1051,8 +1051,8 @@ mod toonify_tests {
 
         let result = toonify_result(true, result);
 
-        let text = match &result.content[0].raw {
-            RawContent::Text(text) => text.text.clone(),
+        let text = match &result.content[0] {
+            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
             other => panic!("expected text content, got {other:?}"),
         };
         assert_eq!(text, "[1]{id,name}:\n  1,alpha");
