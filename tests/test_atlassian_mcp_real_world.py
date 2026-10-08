@@ -29,9 +29,13 @@ SCOPED_TOKEN_ENV = "ATLASSIAN_MCP_SCOPED_API_TOKEN"
 BASIC_TOKEN_ENV = "ATLASSIAN_MCP_BASIC_TOKEN"
 # Generated TS/Python snippets read the full header value from this variable.
 AUTHORIZATION_ENV = "MCP_TEST_ATLASSIAN_AUTHORIZATION"
-SAFE_TOOL = "getAccessibleAtlassianResources"
-SAFE_PYTHON_FUNCTION = "get_accessible_atlassian_resources"
-SAFE_SUBCOMMAND = "get-accessible-atlassian-resources"
+# A read-only, argument-free tool that succeeds for scoped API tokens.
+# (getAccessibleAtlassianResources answers isError 401 for scoped tokens.)
+SAFE_TOOL = "atlassianUserInfo"
+SAFE_PYTHON_FUNCTION = "atlassian_user_info"
+SAFE_SUBCOMMAND = "atlassian-user-info"
+# Every successful atlassianUserInfo result includes the caller's account id.
+SAFE_RESULT_MARKER = "account_id"
 CORE_BIN = ROOT / "target" / "debug" / "mcp-compressor"
 
 
@@ -249,7 +253,7 @@ def test_atlassian_cli_mode_creates_usable_cli() -> None:
         call_result = subprocess.run(
             [str(script), SAFE_SUBCOMMAND], text=True, capture_output=True, check=True, timeout=30
         )
-        assert call_result.stdout.strip()
+        assert SAFE_RESULT_MARKER in call_result.stdout, call_result.stdout
     finally:
         _stop(child)
 
@@ -270,7 +274,7 @@ def test_atlassian_code_modes_generate_clients(language: str, expected: str) -> 
                 [
                     sys.executable,
                     "-c",
-                    f"import sys; sys.path.insert(0, {output_dir!r}); import atlassian; print(atlassian.get_accessible_atlassian_resources())",
+                    f"import sys; sys.path.insert(0, {output_dir!r}); import atlassian; print(atlassian.atlassian_user_info())",
                 ],
                 text=True,
                 capture_output=True,
@@ -282,14 +286,14 @@ def test_atlassian_code_modes_generate_clients(language: str, expected: str) -> 
                 [
                     "bun",
                     "--eval",
-                    f"import {{ getAccessibleAtlassianResources }} from {json.dumps(str(Path(output_dir) / 'atlassian.ts'))}; console.log(await getAccessibleAtlassianResources());",
+                    f"import {{ atlassianUserInfo }} from {json.dumps(str(Path(output_dir) / 'atlassian.ts'))}; console.log(await atlassianUserInfo());",
                 ],
                 text=True,
                 capture_output=True,
                 check=True,
                 timeout=30,
             )
-        assert result.stdout.strip()
+        assert SAFE_RESULT_MARKER in result.stdout, result.stdout
     finally:
         _stop(child)
 
@@ -393,7 +397,7 @@ def test_atlassian_python_high_level_compressor_client() -> None:
             "atlassian_atlassian_get_tool_schema",
             "atlassian_atlassian_invoke_tool",
         }
-        assert proxy.invoke(SAFE_TOOL, {}, server="atlassian_atlassian")
+        assert SAFE_RESULT_MARKER in proxy.invoke(SAFE_TOOL, {}, server="atlassian_atlassian")
 
 
 def test_atlassian_python_high_level_generated_clients(tmp_path) -> None:
@@ -420,26 +424,26 @@ def test_atlassian_python_high_level_generated_clients(tmp_path) -> None:
             [
                 sys.executable,
                 "-c",
-                f"import sys; sys.path.insert(0, {str(python_module.parent)!r}); import atlassian; print(atlassian.get_accessible_atlassian_resources())",
+                f"import sys; sys.path.insert(0, {str(python_module.parent)!r}); import atlassian; print(atlassian.atlassian_user_info())",
             ],
             text=True,
             capture_output=True,
             check=True,
             timeout=60,
         )
-        assert py_result.stdout.strip()
+        assert SAFE_RESULT_MARKER in py_result.stdout, py_result.stdout
         ts_result = subprocess.run(
             [
                 "bun",
                 "--eval",
-                f"import {{ getAccessibleAtlassianResources }} from {json.dumps(str(typescript_module))}; console.log(await getAccessibleAtlassianResources());",
+                f"import {{ atlassianUserInfo }} from {json.dumps(str(typescript_module))}; console.log(await atlassianUserInfo());",
             ],
             text=True,
             capture_output=True,
             check=True,
             timeout=60,
         )
-        assert ts_result.stdout.strip()
+        assert SAFE_RESULT_MARKER in ts_result.stdout, ts_result.stdout
 
 
 def test_atlassian_python_native_session() -> None:
@@ -506,7 +510,7 @@ def test_atlassian_typescript_high_level_compressor_client() -> None:
     )
     payload: dict[str, Any] = json.loads(result.stdout)
     assert payload["tools"] == ["atlassian_atlassian_get_tool_schema", "atlassian_atlassian_invoke_tool"]
-    assert payload["output"]
+    assert SAFE_RESULT_MARKER in payload["output"], payload
 
 
 def test_atlassian_typescript_native_session() -> None:

@@ -64,8 +64,16 @@ def _exec(tool: str, tool_input: dict) -> str:
         with _urllib_request.urlopen(request) as response:
             return _unwrap_proxy_response(response.read().decode())
     except _urllib_error.HTTPError as exc:
-        message = exc.read().decode(errors="replace") or exc.reason
-        raise RuntimeError(f"mcp-compressor proxy returned HTTP {{exc.code}}: {{message}}") from None
+        body = exc.read().decode(errors="replace")
+        try:
+            parsed = _json.loads(body)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+            raise RuntimeError(parsed["error"]) from None
+        raise RuntimeError(
+            f"mcp-compressor proxy returned HTTP {{exc.code}}: {{body or exc.reason}}"
+        ) from None
     except OSError as exc:
         details = getattr(exc, "reason", exc)
         raise RuntimeError(

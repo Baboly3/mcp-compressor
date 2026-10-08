@@ -78,15 +78,14 @@ fn client_python_body(config: &GeneratorConfig) -> String {
             serde_json::Value::String(help::render_subcommand_help(&config.cli_name, tool)),
         );
     }
+    let required_flags = required_flags_literal(config);
+    let cli_name = serde_json::to_string(&config.cli_name).expect("cli name should serialize");
     let subcommands = serde_json::Value::Object(subcommand_map).to_string();
     let subcommand_help = serde_json::Value::Object(subcommand_help_map).to_string();
-    let usage = serde_json::to_string(&format!(
-        "Usage: {} <subcommand> [args...]",
-        config.cli_name
-    ))
-    .expect("usage should serialize");
     format!(
-        r#"import base64, json, os, sys, urllib.error, urllib.request
+        r#"import base64, json, math, os, re, sys, urllib.error, urllib.request
+
+CLI_NAME = {cli_name}
 
 TOP_HELP = {top_help}
 
@@ -97,6 +96,9 @@ TOOL_SCHEMAS = json.loads(base64.b64decode({tool_schemas:?}).decode("utf-8"))
 SUBCOMMANDS = {subcommands}
 
 SUBCOMMAND_HELP = {subcommand_help}
+
+# Required properties per tool, paired with the flag `--help` shows for them.
+REQUIRED_FLAGS = {required_flags}
 
 properties = {{}}
 
@@ -189,15 +191,25 @@ def find_bridge():
             return entry
     return None
 
+class UsageError(Exception):
+    """A malformed invocation. Messages match the native parser used by Just Bash."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
 def schema_type(schema):
     return schema.get("type") if isinstance(schema, dict) else None
+
+def enum_label(value):
+    return value if isinstance(value, str) else json.dumps(value)
 
 def enum_values(schema):
     if not isinstance(schema, dict):
         return []
     explicit = schema.get("enum")
     if isinstance(explicit, list):
-        return [str(value) for value in explicit]
+        return [enum_label(value) for value in explicit]
     return []
 
 def canonical_name(value):
@@ -223,23 +235,27 @@ def coerce_value(flag, schema, raw_value, forced_bool=None):
         return forced_bool
     typ = schema_type(schema)
     if typ == "boolean":
-        if raw_value is None:
-            return True
-        if raw_value == "true":
+        if raw_value is None or raw_value == "true":
             return True
         if raw_value == "false":
             return False
-        raise SystemExit(f"invalid boolean value for {{flag}}: {{raw_value}} (expected true or false)")
+        raise UsageError("parse", f"invalid boolean value for {{flag}}: {{raw_value}} (expected true or false)")
     if typ == "integer":
-        try:
-            return int(raw_value)
-        except Exception:
-            raise SystemExit(f"invalid integer value for {{flag}}: {{raw_value}}")
+        if re.fullmatch(r"[+-]?[0-9]+", raw_value or "") is None:
+            raise UsageError("parse", f"invalid integer value for {{flag}}: {{raw_value}}")
+        return int(raw_value)
     if typ == "number":
         try:
-            return float(raw_value)
-        except Exception:
-            raise SystemExit(f"invalid number value for {{flag}}: {{raw_value}}")
+            if "_" in raw_value or raw_value != raw_value.strip():
+                raise ValueError(raw_value)
+            number = float(raw_value)
+            if not math.isfinite(number):
+                raise ValueError(raw_value)
+            return number
+        except ValueError:
+            raise UsageError("parse", f"invalid number value for {{flag}}: {{raw_value}}") from None
+    if typ == "string":
+        return raw_value or ""
     if typ == "array":
         try:
             parsed = json.loads(raw_value)
@@ -248,6 +264,14 @@ def coerce_value(flag, schema, raw_value, forced_bool=None):
         except Exception:
             pass
         return coerce_value(flag, schema.get("items", {{}}), raw_value)
+    if typ == "object":
+        try:
+            parsed = json.loads(raw_value or "")
+        except Exception:
+            parsed = None
+        if not isinstance(parsed, dict):
+            raise UsageError("parse", f"invalid JSON object for {{flag}}: {{raw_value or ''}}")
+        return parsed
     try:
         return json.loads(raw_value or "")
     except Exception:
@@ -259,9 +283,11 @@ def validate_value(flag, schema, value):
         return
     values = value if isinstance(value, list) else [value]
     for candidate in values:
-        if str(candidate) not in allowed:
-            raise SystemExit(
-                f"invalid value for {{flag}}: {{candidate}} (expected one of: {{', '.join(allowed)}})"
+        label = enum_label(candidate)
+        if label not in allowed:
+            raise UsageError(
+                "parse",
+                f"invalid value for {{flag}}: {{label}} (expected one of: {{', '.join(allowed)}})",
             )
 
 def insert_value(output, key, schema, value):
@@ -271,28 +297,34 @@ def insert_value(output, key, schema, value):
     else:
         output[key] = value
 
-def parse_args(argv):
+def parse_args(tool_name, argv):
     if argv and argv[0] == "--json":
         if len(argv) < 2:
-            raise SystemExit("--json requires a value")
+            raise UsageError("parse", "--json requires a value")
         if len(argv) > 2:
-            raise SystemExit("--json cannot be combined with other arguments")
-        return json.loads(argv[1])
+            raise UsageError("parse", "--json cannot be combined with other arguments")
+        try:
+            parsed = json.loads(argv[1])
+        except Exception:
+            parsed = None
+        if not isinstance(parsed, dict):
+            raise UsageError("parse", f"invalid JSON object for --json: {{argv[1]}}")
+        return parsed
     output = {{}}
     index = 0
     while index < len(argv):
         flag = argv[index]
         if not flag.startswith("--") or flag == "--":
-            raise SystemExit(f"unexpected positional argument: {{flag}}")
+            raise UsageError("parse", f"unexpected positional argument: {{flag}}")
         prop = flag_to_property(flag)
         if prop not in properties:
-            raise SystemExit(f"unknown flag: {{flag}}")
+            raise UsageError("parse", f"unknown flag: {{flag}}")
         schema = properties[prop]
         typ = schema_type(schema)
         forced_bool = False if flag.startswith("--no-") else None
         if forced_bool is False:
             if typ != "boolean":
-                raise SystemExit(f"{{flag}} can only be used with boolean properties")
+                raise UsageError("parse", f"{{flag}} can only be used with boolean properties")
             raw_value = None
             consumed = 1
         elif typ == "boolean":
@@ -304,14 +336,31 @@ def parse_args(argv):
                 consumed = 1
         else:
             if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
-                raise SystemExit(f"{{flag}} requires a value")
+                raise UsageError("parse", f"{{flag}} requires a value")
             raw_value = argv[index + 1]
             consumed = 2
         value = coerce_value(flag, schema, raw_value, forced_bool)
         validate_value(flag, schema, value)
         insert_value(output, prop, schema, value)
         index += consumed
+    for prop, flag in REQUIRED_FLAGS.get(tool_name, []):
+        if prop not in output:
+            raise UsageError("validation", f"missing required argument: {{flag}}")
     return output
+
+def usage_failure(error, help_command):
+    print(f"{{error.kind}} error: {{error}}", file=sys.stderr)
+    print(f"Run '{{help_command}} --help' for usage.", file=sys.stderr)
+    return 2
+
+def bridge_error_message(status, body):
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+        return parsed["error"]
+    return f"mcp-compressor proxy returned HTTP {{status}}: {{body or 'no response body'}}"
 
 def unwrap_proxy_response(body):
     try:
@@ -331,23 +380,25 @@ def main():
         return 0
     subcommand = argv[0]
     if subcommand not in SUBCOMMANDS:
-        print({usage}, file=sys.stderr)
-        return 2
+        return usage_failure(UsageError("parse", f"unknown subcommand: {{subcommand}}"), CLI_NAME)
     rest = argv[1:]
     if rest and rest[0] in ("--help", "-h", "help"):
         print(SUBCOMMAND_HELP[subcommand])
         return 0
     tool_name = SUBCOMMANDS[subcommand]
+    tool_schema = TOOL_SCHEMAS[tool_name]
+    properties = tool_schema.get("inputSchema") or tool_schema.get("input_schema") or {{}}
+    properties = properties.get("properties", {{}}) if isinstance(properties, dict) else {{}}
+    try:
+        tool_input = parse_args(tool_name, rest)
+    except UsageError as error:
+        return usage_failure(error, f"{{CLI_NAME}} {{subcommand}}")
     entry = find_bridge()
     if entry is None:
         print("mcp-compressor proxy is not running; restart the mcp-compressor CLI-mode process and try again.", file=sys.stderr)
         return 1
     bridge = entry["bridge"]
     token = entry["token"]
-    tool_schema = TOOL_SCHEMAS[tool_name]
-    properties = tool_schema.get("inputSchema") or tool_schema.get("input_schema") or {{}}
-    properties = properties.get("properties", {{}}) if isinstance(properties, dict) else {{}}
-    tool_input = parse_args(rest)
     payload = json.dumps({{"tool": tool_name, "input": tool_input}}).encode()
     req = urllib.request.Request(
         bridge + "/exec",
@@ -359,8 +410,7 @@ def main():
         with urllib.request.urlopen(req, timeout=30) as resp:
             sys.stdout.write(unwrap_proxy_response(resp.read().decode()))
     except urllib.error.HTTPError as exc:
-        message = exc.read().decode(errors="replace") or exc.reason
-        print(f"mcp-compressor proxy returned HTTP {{exc.code}}: {{message}}", file=sys.stderr)
+        print(bridge_error_message(exc.code, exc.read().decode(errors="replace")), file=sys.stderr)
         return 1
     except urllib.error.URLError as exc:
         print(
@@ -379,8 +429,36 @@ if __name__ == "__main__":
         tool_schemas = tool_schemas,
         subcommands = subcommands,
         subcommand_help = subcommand_help,
-        usage = usage,
+        cli_name = cli_name,
+        required_flags = required_flags,
     )
+}
+
+/// `{tool_name: [[property, flag], ...]}` for every required property, using
+/// the same flag spelling as `--help` and the native parser's error messages.
+fn required_flags_literal(config: &GeneratorConfig) -> String {
+    let map: serde_json::Map<String, serde_json::Value> = config
+        .tools
+        .iter()
+        .map(|tool| {
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(|property| {
+                    serde_json::json!([
+                        property,
+                        format!("--{}", tool_name_to_subcommand(property))
+                    ])
+                })
+                .collect();
+            (tool.name.clone(), serde_json::Value::Array(required))
+        })
+        .collect();
+    serde_json::Value::Object(map).to_string()
 }
 
 /// Unix client: a thin `sh` wrapper that runs the shared program through `python3`.

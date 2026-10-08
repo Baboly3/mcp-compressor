@@ -210,6 +210,27 @@ atlassian get-confluence-page --page-id "123456"
 
 This avoids placing every MCP tool schema in the model context.
 
+### Arguments and errors
+
+Flags are converted using the tool's input schema:
+
+- `string` properties are passed verbatim; `--page-id 123` sends `"123"`, never a number.
+- `integer`, `number`, and `boolean` properties must parse as that type.
+- `object` properties take a JSON object, for example `--filters '{"status":"open"}'`.
+- Array properties accept the flag more than once.
+- `--json '{...}'` sends a whole JSON object as the tool arguments. It can't be combined with other flags.
+
+Generated CLIs and [Just Bash](just-bash.md) commands report errors the same way:
+
+| Failure | Exit code | stderr |
+|---|---|---|
+| Unknown subcommand or flag, bad value, missing required flag | `2` | `parse error: ...` or `validation error: ...`, then `Run '<cli> <subcommand> --help' for usage.` |
+| The backend tool failed | `1` | The tool's error message |
+
+Error messages name the flag the agent typed, such as `--page-id`, not the schema property. Nothing is written to stdout when a command fails, so pipelines like `atlassian get-confluence-page --page-id 1 | jq .` don't parse error text.
+
+In Code Mode, a tool failure raises `RuntimeError` in Python and rejects with an `Error` in TypeScript. Either way the message is the tool's own error text.
+
 ## How an agent might use Code Mode
 
 A Python-capable agent can inspect the generated module or use normal autocomplete/static analysis:

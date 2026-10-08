@@ -307,7 +307,7 @@ impl CompressedServer {
         let result = self
             .invoke_backend_result(backend, backend_tool_name, tool_input, None)
             .await?;
-        Ok(self.tool_result_to_string(result))
+        self.tool_result_to_output(result)
     }
 
     pub(crate) async fn invoke_tool_result(
@@ -439,7 +439,7 @@ impl CompressedServer {
         let result = self
             .invoke_backend_result(backend, backend_tool_name, tool_input, None)
             .await?;
-        Ok(self.tool_result_to_string(result))
+        self.tool_result_to_output(result)
     }
 
     async fn invoke_backend_result(
@@ -471,9 +471,16 @@ impl CompressedServer {
             .map_err(|error| Error::Config(error.to_string()))
     }
 
-    fn tool_result_to_string(&self, result: CallToolResult) -> String {
+    /// Flatten a tool result for string transports (bridge `/exec`, in-process
+    /// sessions). A result the backend flagged with `isError` becomes
+    /// [`Error::ToolExecution`] so callers exit non-zero or raise, instead of
+    /// printing the failure as if it were output.
+    fn tool_result_to_output(&self, result: CallToolResult) -> Result<String, Error> {
+        if result.is_error == Some(true) {
+            return Err(Error::ToolExecution(call_tool_result_to_string(result)));
+        }
         let output = call_tool_result_to_string(result);
-        self.maybe_toonify_output(&output)
+        Ok(self.maybe_toonify_output(&output))
     }
 
     fn maybe_toonify_output(&self, output: &str) -> String {

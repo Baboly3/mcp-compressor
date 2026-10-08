@@ -431,4 +431,124 @@ describe("CLI and Just Bash output parity", () => {
       cli.close();
     }
   });
+
+  it("reports usage and tool errors identically", async () => {
+    const schema = (properties: Record<string, unknown>, required: string[] = []) => ({
+      type: "object",
+      properties,
+      required,
+    });
+    const errorTools: Record<string, ExecutableTool<unknown>> = {
+      search_issues: {
+        name: "search_issues",
+        description: "Search issues.",
+        inputSchema: schema(
+          {
+            query: { type: "string" },
+            order: { type: "string", enum: ["asc", "desc"] },
+            limit: { type: "integer" },
+          },
+          ["query"],
+        ),
+        execute: async (input) => input,
+      },
+      nested: {
+        name: "nested",
+        description: "Echo nested input.",
+        inputSchema: schema({ filters: { type: "object" } }, ["filters"]),
+        execute: async (input) => input,
+      },
+      fail: {
+        name: "fail",
+        description: "Always fails.",
+        inputSchema: schema({}),
+        execute: async () => {
+          throw new Error("backend exploded: code 42");
+        },
+      },
+    };
+    const usage = (message: string, help: string) => `${message}\nRun '${help} --help' for usage.`;
+    // Usage errors exit 2 with a pointer to help; tool errors exit 1 with the
+    // tool's own message. Neither writes to stdout.
+    const cases: Array<{ args: string[]; exitCode: number; stderr: string }> = [
+      {
+        args: ["search-issues", "--query", "x", "--order", "sideways"],
+        exitCode: 2,
+        stderr: usage(
+          "parse error: invalid value for --order: sideways (expected one of: asc, desc)",
+          "errs search-issues",
+        ),
+      },
+      {
+        args: ["search-issues", "--query", "x", "--limit", "ten"],
+        exitCode: 2,
+        stderr: usage("parse error: invalid integer value for --limit: ten", "errs search-issues"),
+      },
+      {
+        args: ["search-issues"],
+        exitCode: 2,
+        stderr: usage("validation error: missing required argument: --query", "errs search-issues"),
+      },
+      {
+        args: ["search-issues", "--query", "x", "--unknown", "1"],
+        exitCode: 2,
+        stderr: usage("parse error: unknown flag: --unknown", "errs search-issues"),
+      },
+      {
+        args: ["search-issues", "--query"],
+        exitCode: 2,
+        stderr: usage("parse error: --query requires a value", "errs search-issues"),
+      },
+      {
+        args: ["bogus"],
+        exitCode: 2,
+        stderr: usage("parse error: unknown subcommand: bogus", "errs"),
+      },
+      {
+        args: ["nested", "--filters", "{bad"],
+        exitCode: 2,
+        stderr: usage("parse error: invalid JSON object for --filters: {bad", "errs nested"),
+      },
+      { args: ["fail"], exitCode: 1, stderr: "backend exploded: code 42" },
+    ];
+
+    const outputDir = mkdtempSync(join(tmpdir(), "mcp-errors-cli-"));
+    const cli = await transformToolsForCliMode(errorTools, { serverName: "errs", outputDir });
+    const bash = new Bash({ customCommands: [] });
+    transformToolsForJustBash(errorTools, { serverName: "errs", bash });
+    try {
+      materializeFiles(outputDir, cli.files, ["errs"]);
+      const scriptPath = generatedScriptPath(outputDir, "errs");
+      for (const { args, exitCode, stderr } of cases) {
+        const label = args.join(" ");
+        const viaBash = await bash.exec(`errs ${args.map((arg) => `'${arg}'`).join(" ")}`);
+        expect(
+          { exitCode: viaBash.exitCode, stdout: viaBash.stdout, stderr: viaBash.stderr.trimEnd() },
+          label,
+        ).toEqual({ exitCode, stdout: "", stderr });
+        const viaCli = await runScriptResult(scriptPath, args);
+        expect(viaCli, label).toEqual({ exitCode, stdout: "", stderr });
+      }
+    } finally {
+      cli.close();
+    }
+  });
 });
+
+async function runScriptResult(
+  scriptPath: string,
+  args: readonly string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      scriptPath,
+      [...args],
+      { encoding: "utf8", shell: process.platform === "win32" },
+      (error, stdout, stderr) => {
+        const exitCode = error ? Number((error as { code?: unknown }).code ?? 1) : 0;
+        const normalize = (text: string) => text.trimEnd().replace(/\r\n/g, "\n");
+        resolve({ exitCode, stdout: normalize(stdout), stderr: normalize(stderr) });
+      },
+    );
+  });
+}

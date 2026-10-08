@@ -1136,3 +1136,144 @@ fn rust_generated_atlassian_like_cli_matches_shared_golden_help() {
         golden("agent-facing/atlassian-like/search-jira-issues-using-jql-help.txt")
     );
 }
+
+fn usage_error_cli(output_dir: &std::path::Path, bridge_url: &str) -> std::path::PathBuf {
+    let config = GeneratorConfig {
+        cli_name: "probe".to_string(),
+        bridge_url: bridge_url.to_string(),
+        token: "token".to_string(),
+        tools: vec![mcp_compressor_core::compression::engine::Tool::new(
+            "get_page",
+            Some("Get a page.".to_string()),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string" },
+                    "limit": { "type": "integer" },
+                    "verbose": { "type": "boolean" },
+                    "filters": { "type": "object" }
+                },
+                "required": ["page_id"]
+            }),
+        )],
+        session_pid: std::process::id(),
+        output_dir: output_dir.to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    };
+    CliGenerator.generate(&config).unwrap();
+    output_dir.join("probe")
+}
+
+#[test]
+fn generated_cli_reports_usage_errors_on_stderr_with_exit_code_2() {
+    // Usage errors are detected before any bridge request; the echo bridge
+    // would otherwise answer, so a success here would mean a request leaked.
+    let bridge = start_echo_bridge();
+    let tempdir = tempfile::tempdir().unwrap();
+    let script = usage_error_cli(tempdir.path(), &bridge.url);
+
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["no-such-command"],
+            "parse error: unknown subcommand: no-such-command\nRun 'probe --help' for usage.",
+        ),
+        (
+            &["get-page"],
+            "validation error: missing required argument: --page-id\nRun 'probe get-page --help' for usage.",
+        ),
+        (
+            &["get-page", "--page-id", "1", "--limit", "ten"],
+            "parse error: invalid integer value for --limit: ten\nRun 'probe get-page --help' for usage.",
+        ),
+        (
+            &["get-page", "--page-id", "1", "--verbose", "maybe"],
+            "parse error: invalid boolean value for --verbose: maybe (expected true or false)\nRun 'probe get-page --help' for usage.",
+        ),
+        (
+            &["get-page", "--page-id", "1", "--filters", "[1]"],
+            "parse error: invalid JSON object for --filters: [1]\nRun 'probe get-page --help' for usage.",
+        ),
+        (
+            &["get-page", "--json", "[]"],
+            "parse error: invalid JSON object for --json: []\nRun 'probe get-page --help' for usage.",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = generated_script_output(&script, args);
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert_eq!(
+            normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+            *expected,
+            "args: {args:?}"
+        );
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+    }
+
+    // String-typed values are passed through verbatim, never JSON-decoded.
+    let output = generated_script_output(&script, &["get-page", "--page-id", "123"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sent: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(sent["input"]["page_id"], serde_json::json!("123"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_clients_surface_backend_tool_errors() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let (mut config, _proxy) = running_proxy_config(tempdir.path()).await;
+    config.tools = real_backend_tools().await;
+
+    CliGenerator.generate(&config).unwrap();
+    let output = generated_script_output(&tempdir.path().join("alpha"), &["tool-error"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        normalize_cli_text(&String::from_utf8_lossy(&output.stderr)),
+        "fixture tool error"
+    );
+    assert!(output.stdout.is_empty());
+
+    PythonGenerator.generate(&config).unwrap();
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(format!(
+            "import sys; sys.path.insert(0, {dir:?}); import alpha\n\
+             try:\n    alpha.tool_error()\n\
+             except RuntimeError as error:\n    print(error)\n",
+            dir = tempdir.path().display().to_string()
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "fixture tool error"
+    );
+
+    TypeScriptGenerator.generate(&config).unwrap();
+    let output = Command::new("bun")
+        .arg("--eval")
+        .arg(format!(
+            "import {{ toolError }} from {module:?}; \
+             try {{ await toolError(); }} catch (error) {{ console.log(error.message); }}",
+            module = tempdir.path().join("alpha.ts").display().to_string()
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "fixture tool error"
+    );
+}

@@ -9,6 +9,11 @@ pub enum Error {
     #[error("tool not found: {0:?}")]
     ToolNotFound(String),
 
+    /// The backend ran the tool and reported failure (`isError`). Displays the
+    /// tool's own message so callers can show it verbatim.
+    #[error("{0}")]
+    ToolExecution(String),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

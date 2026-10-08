@@ -51,9 +51,21 @@ async function execTool(tool: string, input: Record<string, unknown>): Promise<s
   }}
   const body = await res.text();
   if (!res.ok) {{
-    throw new Error(`mcp-compressor proxy returned HTTP ${{res.status}}: ${{body}}`);
+    throw new Error(bridgeErrorMessage(res.status, body));
   }}
   return unwrapProxyResponse(body);
+}}
+
+function bridgeErrorMessage(status: number, body: string): string {{
+  try {{
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as {{ error?: unknown }}).error === "string") {{
+      return (parsed as {{ error: string }}).error;
+    }}
+  }} catch {{
+    // Not JSON; report the raw body below.
+  }}
+  return `mcp-compressor proxy returned HTTP ${{status}}: ${{body || "no response body"}}`;
 }}
 
 function unwrapProxyResponse(body: string): string {{
@@ -200,6 +212,7 @@ const TS_RESERVED: &[&str] = &[
     "HEADERS",
     "execTool",
     "unwrapProxyResponse",
+    "bridgeErrorMessage",
 ];
 
 fn ts_identifier(name: &str) -> String {
