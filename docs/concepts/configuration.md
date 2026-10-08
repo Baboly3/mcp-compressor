@@ -178,4 +178,4 @@ TOON conversion is off by default in every mode, including CLI mode and Just Bas
     ```
 
 !!! note
-    TOON output is most effective for tool responses that return deeply nested JSON objects. Plain text responses pass through unchanged. CSV is recognised by a header row of two or more named columns followed by at least one row of the same width; YAML by a mapping or list of mappings with nested values. Flat `key: value` text, bullet lists and text that merely contains commas or colons are left as is.
+    TOON output is most effective for tool responses that return deeply nested JSON objects. Plain text responses pass through unchanged. CSV is recognised by a header row of two or more named columns followed by rows of the same width. A single data row must contain a number, boolean or empty cell, so two lines of comma-separated words stay as text; YAML by a mapping or list of mappings with nested values. Flat `key: value` text, bullet lists and text that merely contains commas or colons are left as is.

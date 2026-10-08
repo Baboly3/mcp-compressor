@@ -804,8 +804,10 @@ fn yaml_is_structured(value: &Value) -> bool {
 }
 
 /// Headers must look like column names, so logs, `KEY=a,b` lines and prose
-/// stay out; rows of a different width fail the non-flexible reader.
-/// "Hello,world\nFoo,bar" still converts.
+/// stay out; rows of a different width fail the non-flexible reader. A
+/// single row of plain words under plain-word headers ("Hello,world\nFoo,bar")
+/// reads as two lines of prose, so one row must hold a number, boolean or
+/// empty cell to count as data.
 fn csv_to_json(text: &str) -> Option<Value> {
     let mut reader = csv::Reader::from_reader(text.as_bytes());
     let headers = reader.headers().ok()?.clone();
@@ -838,7 +840,16 @@ fn csv_to_json(text: &str) -> Option<Value> {
             ))
         })
         .collect::<Option<Vec<_>>>()?;
-    (!rows.is_empty()).then_some(Value::Array(rows))
+    let looks_like_data = match rows.as_slice() {
+        [] => false,
+        [row] => row.as_object().is_some_and(|cells| {
+            cells
+                .values()
+                .any(|cell| !cell.is_string() || cell.as_str() == Some(""))
+        }),
+        _ => true,
+    };
+    looks_like_data.then_some(Value::Array(rows))
 }
 
 /// Typed only when it prints back as the same text, so "007" and "3.10" survive.
@@ -948,6 +959,11 @@ mod toonify_tests {
                 "[1]{id,zip,ver,neg,exp,ratio,flag}:\n  42,\"007\",\"3.10\",\"-0\",\"1e5\",2.5,true",
             ),
             ("a,b\n1,\n", "[1]{a,b}:\n  1,\"\""),
+            // Several all-text rows are still a table.
+            (
+                "name,team\nada,core\nlin,web\n",
+                "[2]{name,team}:\n  ada,core\n  lin,web",
+            ),
             ("name: svc\nports:\n  - 80\n  - 443\n", "name: svc\nports[2]: 80,443"),
             (
                 "- id: 1\n  name: alpha\n- id: 2\n  name: beta\n",
@@ -996,6 +1012,8 @@ mod toonify_tests {
             "2026-09-22 10:00:00 INFO started\n2026-09-22 10:00:01 INFO done\n",
             "2026-09-22,INFO,started\n2026-09-22,INFO,done\n",
             "1,alpha\n2,beta\n",
+            "Hello,world\nFoo,bar",
+            "Yes,thanks\nSee,you\n",
             "id,name\n",
             "id,name\n1,alpha,extra\n",
             "id\n1\n2\n",

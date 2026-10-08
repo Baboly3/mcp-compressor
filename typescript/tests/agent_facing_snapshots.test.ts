@@ -587,5 +587,7 @@ describe("compressTools toonify option", () => {
     await expect(invoke(compressed, "structured")).resolves.toBe(
       "rows[2]{id,ok}:\n  1,true\n  2,false\ntotal: 2",
     );
+    // Two lines of comma-separated words are prose, not a one-row CSV table.
+    await expect(invoke(compressed, "prose")).resolves.toBe("Hello,world\nFoo,bar");
   });
 });
