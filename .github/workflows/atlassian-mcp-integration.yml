@@ -53,6 +53,9 @@ jobs:
 
       - name: Run Atlassian MCP real-world integration tests
         env:
+          # Preferred: raw scoped API token, sent as Bearer.
+          ATLASSIAN_MCP_SCOPED_API_TOKEN: ${{ secrets.ATLASSIAN_MCP_SCOPED_API_TOKEN }}
+          # Legacy fallback: base64("email:api_token"), sent as Basic.
           ATLASSIAN_MCP_BASIC_TOKEN: ${{ secrets.ATLASSIAN_MCP_BASIC_TOKEN }}
           PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: uv run pytest -q tests/test_atlassian_mcp_real_world.py

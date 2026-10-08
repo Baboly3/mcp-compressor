@@ -181,11 +181,16 @@ uv run pytest -q tests/test_public_cli_workflows.py
 uv run pytest -q tests/test_rust_core_normal_mode.py
 ```
 
-Real-world Atlassian MCP tests require:
+Real-world Atlassian MCP tests require one of:
 
 ```bash
-ATLASSIAN_MCP_BASIC_TOKEN=...
+ATLASSIAN_MCP_SCOPED_API_TOKEN=ATATT...   # raw scoped API token, sent as Bearer (preferred)
+ATLASSIAN_MCP_BASIC_TOKEN=...             # base64("email:api_token"), sent as Basic
 ```
+
+The Atlassian MCP server does not reject credentials it can't use. It returns a
+reduced anonymous catalog instead, which the suite's preflight reports as a
+single clear failure. A raw API token in `ATLASSIAN_MCP_BASIC_TOKEN` causes this.
 
 and normally run via the dedicated GitHub environment/workflow.
 

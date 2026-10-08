@@ -498,13 +498,10 @@ async fn generated_python_module_reports_stopped_proxy_without_urllib_traceback(
     );
 
     let mut command = tokio::process::Command::new(common::python_command());
-    command
-        .kill_on_drop(true)
-        .arg("-c")
-        .arg(format!(
-            "import sys; sys.path.insert(0, {dir:?}); import alpha; alpha.echo('hello')",
-            dir = module.parent().unwrap().display().to_string()
-        ));
+    command.kill_on_drop(true).arg("-c").arg(format!(
+        "import sys; sys.path.insert(0, {dir:?}); import alpha; alpha.echo('hello')",
+        dir = module.parent().unwrap().display().to_string()
+    ));
     let output = tokio::time::timeout(Duration::from_secs(30), command.output())
         .await
         .expect("the generated Python client must exit when its proxy is stopped")
@@ -741,6 +738,149 @@ fn generated_typescript_module_returns_raw_host_bridge_result() {
     );
 }
 
+/// Tool and parameter names that are reserved words, shadow names the generated
+/// module defines, or are not identifiers at all. Modelled on the live Atlassian
+/// catalog (`getJsmOpsAlerts` takes a `from` parameter). Every generated client
+/// must still import, and must send the original names on the wire.
+fn hostile_names_config(bridge_url: &str, output_dir: &std::path::Path) -> GeneratorConfig {
+    let tool = |name: &str, description: &str, schema: serde_json::Value| {
+        mcp_compressor_core::compression::engine::Tool::new(
+            name,
+            Some(description.to_string()),
+            schema,
+        )
+    };
+    GeneratorConfig {
+        cli_name: "alpha".to_string(),
+        bridge_url: bridge_url.to_string(),
+        token: "token".to_string(),
+        tools: vec![
+            tool(
+                "import",
+                r#"Match \N{BULLET} or \u2022 under C:\new\table; say "hi""#,
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "class": { "type": "string" },
+                        "default": { "type": "string" },
+                        "my-param": { "type": "string" },
+                        "2fa": { "type": "string" },
+                        "_exec": { "type": "string" },
+                        "execTool": { "type": "string" },
+                        "unused": { "type": "string" }
+                    },
+                    "required": ["from"]
+                }),
+            ),
+            tool(
+                "json",
+                "A tool whose name shadows a stdlib module.",
+                serde_json::json!({ "type": "object", "properties": { "value": { "type": "string" } } }),
+            ),
+        ],
+        session_pid: std::process::id(),
+        output_dir: output_dir.to_path_buf(),
+        extra_cli_bridges: Vec::new(),
+    }
+}
+
+fn hostile_expected_payload() -> serde_json::Value {
+    serde_json::json!({
+        "tool": "import",
+        "input": {
+            "from": "F", "class": "C", "default": "D", "my-param": "M",
+            "2fa": "2", "_exec": "E", "execTool": "T"
+        }
+    })
+}
+
+#[test]
+fn generated_python_module_handles_reserved_and_invalid_names() {
+    let bridge = start_echo_bridge();
+    let tempdir = tempfile::tempdir().unwrap();
+    PythonGenerator
+        .generate(&hostile_names_config(&bridge.url, tempdir.path()))
+        .unwrap();
+
+    let script = r#"
+import json as stdlib_json
+import alpha
+print(alpha.import_("F", class_="C", default="D", my_param="M", _2fa="2", _exec_="E", exec_tool="T"))
+print(alpha.json(value="v"))
+print(stdlib_json.dumps(alpha.import_.__doc__))
+"#;
+    let output = Command::new(common::python_command())
+        .env("PYTHONPATH", tempdir.path())
+        .args(["-c", script])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
+        hostile_expected_payload(),
+        "omitted optional arguments must not be sent as null"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[1]).unwrap(),
+        serde_json::json!({ "tool": "json", "input": { "value": "v" } })
+    );
+    assert_eq!(
+        serde_json::from_str::<String>(lines[2]).unwrap(),
+        r#"Match \N{BULLET} or \u2022 under C:\new\table; say "hi""#,
+        "docstring must reproduce the description verbatim"
+    );
+}
+
+#[test]
+fn generated_typescript_module_handles_reserved_and_invalid_names() {
+    let bridge = start_echo_bridge();
+    let tempdir = tempfile::tempdir().unwrap();
+    TypeScriptGenerator
+        .generate(&hostile_names_config(&bridge.url, tempdir.path()))
+        .unwrap();
+
+    let code = format!(
+        "import * as alpha from {module:?};\n\
+         console.log(await alpha.import_('F', 'C', 'D', 'M', '2', 'E', 'T'));\n\
+         console.log(await alpha.json('v'));",
+        module = tempdir.path().join("alpha.ts").display().to_string()
+    );
+    let output = Command::new("bun")
+        .arg("--eval")
+        .arg(&code)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
+        hostile_expected_payload()
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[1]).unwrap(),
+        serde_json::json!({ "tool": "json", "input": { "value": "v" } })
+    );
+    let declarations = std::fs::read_to_string(tempdir.path().join("alpha.d.ts")).unwrap();
+    assert!(
+        declarations.contains("export function import_(from: string, class_?: string, default_?: string, my_param?: string, _2fa?: string, _exec?: string, execTool_?: string, unused?: string)"),
+        "declarations must use the same safe identifiers: {declarations}"
+    );
+}
+
 struct TestBridge {
     url: String,
 }
@@ -757,6 +897,38 @@ fn start_json_result_bridge(result: &str) -> TestBridge {
                 "ok".to_string()
             } else {
                 serde_json::json!({ "result": result }).to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+            let _ = stream.shutdown(Shutdown::Write);
+        }
+    });
+    TestBridge {
+        url: format!("http://{addr}"),
+    }
+}
+
+/// A bridge that answers each `/exec` with the request body it received, so
+/// tests can assert exactly what a generated client put on the wire.
+fn start_echo_bridge() -> TestBridge {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(16) {
+            let mut stream = stream.unwrap();
+            let request = read_http_request(&mut stream);
+            let body = if request.starts_with("GET /health") {
+                "ok".to_string()
+            } else {
+                let exec_body = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or("");
+                serde_json::json!({ "result": exec_body }).to_string()
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

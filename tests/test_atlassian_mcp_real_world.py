@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # These tests intentionally spawn trusted local binaries and call the fixed Atlassian MCP HTTPS endpoint.
 # ruff: noqa: S105,S603,S607,S310
+import asyncio
 import importlib
 import json
 import os
@@ -22,18 +23,60 @@ from fastmcp import Client
 
 ROOT = Path(__file__).parents[1]
 ATLASSIAN_URL = "https://mcp.atlassian.com/v1/mcp"
-TOKEN_ENV = "ATLASSIAN_MCP_BASIC_TOKEN"
+# Preferred: a raw Atlassian scoped API token, sent as a Bearer token.
+SCOPED_TOKEN_ENV = "ATLASSIAN_MCP_SCOPED_API_TOKEN"
+# Legacy: base64("email:api_token"), sent as HTTP Basic credentials.
+BASIC_TOKEN_ENV = "ATLASSIAN_MCP_BASIC_TOKEN"
+# Generated TS/Python snippets read the full header value from this variable.
+AUTHORIZATION_ENV = "MCP_TEST_ATLASSIAN_AUTHORIZATION"
 SAFE_TOOL = "getAccessibleAtlassianResources"
 SAFE_PYTHON_FUNCTION = "get_accessible_atlassian_resources"
 SAFE_SUBCOMMAND = "get-accessible-atlassian-resources"
 CORE_BIN = ROOT / "target" / "debug" / "mcp-compressor"
 
 
-def _token() -> str:
-    token = os.environ.get(TOKEN_ENV)
-    if not token:
-        pytest.skip(f"{TOKEN_ENV} is not set")
-    return cast("str", token)
+def _authorization() -> str:
+    """Return the Authorization header value for the live Atlassian MCP server.
+
+    The server does not reject malformed credentials. It answers with a reduced
+    anonymous catalog instead, so sending a raw API token as Basic credentials
+    looks like "tool not found" errors rather than an auth failure.
+    """
+    scoped = os.environ.get(SCOPED_TOKEN_ENV)
+    if scoped:
+        return f"Bearer {scoped}"
+    basic = os.environ.get(BASIC_TOKEN_ENV)
+    if basic:
+        return f"Basic {basic}"
+    pytest.skip(f"neither {SCOPED_TOKEN_ENV} nor {BASIC_TOKEN_ENV} is set")
+
+
+def _auth_env() -> dict[str, str]:
+    return {**os.environ, AUTHORIZATION_ENV: _authorization()}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_full_catalog() -> None:
+    """Fail fast with a clear message when credentials only unlock the anonymous catalog."""
+    if not (os.environ.get(SCOPED_TOKEN_ENV) or os.environ.get(BASIC_TOKEN_ENV)):
+        return
+
+    async def list_tool_names() -> set[str]:
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        transport = StreamableHttpTransport(ATLASSIAN_URL, headers={"Authorization": _authorization()})
+        async with Client(transport) as client:
+            return {tool.name for tool in await client.list_tools()}
+
+    names = asyncio.run(list_tool_names())
+    if SAFE_TOOL not in names:
+        pytest.fail(
+            f"Atlassian MCP returned {len(names)} tools without {SAFE_TOOL!r}: {sorted(names)}. "
+            "The server returns this reduced catalog when the Authorization header is not accepted, "
+            f"e.g. a raw API token sent as Basic. Set {SCOPED_TOKEN_ENV} to a scoped API token (sent as Bearer), "
+            f"or {BASIC_TOKEN_ENV} to base64('email:api_token').",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -42,7 +85,7 @@ def _build_core() -> None:
 
 
 def _backend_args() -> list[str]:
-    return [ATLASSIAN_URL, "-H", f"Authorization=Basic {_token()}", "--auth", "explicit-headers"]
+    return [ATLASSIAN_URL, "-H", f"Authorization={_authorization()}", "--auth", "explicit-headers"]
 
 
 def _client_config(*args: str) -> dict[str, Any]:
@@ -148,7 +191,7 @@ def _stop(child: subprocess.Popen[str]) -> None:
 @pytest.mark.parametrize("level", ["low", "medium", "high", "max"])
 @pytest.mark.asyncio
 async def test_atlassian_cli_stdio_compression_levels(level: str) -> None:
-    _token()
+    _authorization()
     async with Client(
         cast(
             "Any",
@@ -170,7 +213,7 @@ async def test_atlassian_cli_stdio_compression_levels(level: str) -> None:
 
 @pytest.mark.asyncio
 async def test_atlassian_cli_filters_and_toonify() -> None:
-    _token()
+    _authorization()
     async with Client(
         cast(
             "Any",
@@ -275,7 +318,7 @@ def test_atlassian_just_bash_mode_starts_bridge() -> None:
 
 @pytest.mark.asyncio
 async def test_atlassian_mcp_config_multi_server_and_streamable_http_port() -> None:
-    _token()
+    _authorization()
     config_path = Path(tempfile.mkdtemp(prefix="mcp-config-")) / "mcp.json"
     config_path.write_text(
         json.dumps({
@@ -338,7 +381,7 @@ def test_atlassian_python_high_level_compressor_client() -> None:
         servers={
             "atlassian": {
                 "url": ATLASSIAN_URL,
-                "headers": {"Authorization": f"Basic {_token()}"},
+                "headers": {"Authorization": _authorization()},
             }
         },
         compression_level="medium",
@@ -361,7 +404,7 @@ def test_atlassian_python_high_level_generated_clients(tmp_path) -> None:
         servers={
             "atlassian": {
                 "url": ATLASSIAN_URL,
-                "headers": {"Authorization": f"Basic {_token()}"},
+                "headers": {"Authorization": _authorization()},
             }
         },
         compression_level="medium",
@@ -411,7 +454,7 @@ def test_atlassian_python_native_session() -> None:
             rust_package.BackendConfig(
                 name="atlassian",
                 command_or_url=ATLASSIAN_URL,
-                args=["-H", f"Authorization=Basic {_token()}", "--auth", "explicit-headers"],
+                args=["-H", f"Authorization={_authorization()}", "--auth", "explicit-headers"],
             )
         ],
     )
@@ -435,7 +478,7 @@ def test_atlassian_typescript_high_level_compressor_client() -> None:
           servers: {{
             atlassian: {{
               url: '{ATLASSIAN_URL}',
-              headers: {{ Authorization: `Basic ${{process.env.{TOKEN_ENV}}}` }},
+              headers: {{ Authorization: process.env.{AUTHORIZATION_ENV} }},
             }},
           }},
           compressionLevel: 'medium',
@@ -455,7 +498,7 @@ def test_atlassian_typescript_high_level_compressor_client() -> None:
     result = subprocess.run(
         ["bun", "--eval", script],
         cwd=ROOT / "typescript",
-        env={**os.environ, TOKEN_ENV: _token()},
+        env=_auth_env(),
         text=True,
         capture_output=True,
         check=True,
@@ -472,7 +515,7 @@ def test_atlassian_typescript_native_session() -> None:
         import {{ startCompressedSession }} from './dist/rust_core.js';
         const session = await startCompressedSession(
           {{ compressionLevel: 'medium', serverName: 'atlassian', includeTools: ['getConfluencePage'] }},
-          [{{ name: 'atlassian', commandOrUrl: '{ATLASSIAN_URL}', args: ['-H', `Authorization=Basic ${{process.env.{TOKEN_ENV}}}`, '--auth', 'explicit-headers'] }}]
+          [{{ name: 'atlassian', commandOrUrl: '{ATLASSIAN_URL}', args: ['-H', `Authorization=${{process.env.{AUTHORIZATION_ENV}}}`, '--auth', 'explicit-headers'] }}]
         );
         const info = session.info();
         console.log(JSON.stringify({{ bridge: info.bridge_url, tools: info.frontend_tools.map((tool) => tool.name).sort() }}));
@@ -482,7 +525,7 @@ def test_atlassian_typescript_native_session() -> None:
     result = subprocess.run(
         ["bun", "--eval", script],
         cwd=ROOT / "typescript",
-        env={**os.environ, TOKEN_ENV: _token()},
+        env=_auth_env(),
         text=True,
         capture_output=True,
         check=True,
