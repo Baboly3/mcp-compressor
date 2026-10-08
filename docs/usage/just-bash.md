@@ -2,7 +2,7 @@
 
 Just Bash mode lets command-oriented agents call MCP tools as shell-style commands.
 
-Use it when your agent already has a Just Bash environment and you want MCP tools to appear as commands. In TypeScript each server becomes one command with a subcommand per tool, exactly like a generated CLI:
+Use it when your agent already has a Just Bash environment and you want MCP tools to appear as commands. Each server becomes one command with a subcommand per tool, exactly like a generated CLI:
 
 ```text
 alpha echo --message hello
@@ -41,8 +41,11 @@ class BashHost:
 with CompressorClient(servers=servers, mode="bash") as proxy:
     bash = BashHost()
     install_just_bash_commands(bash, proxy)
-    print(bash.custom_commands["echo"](["--message", "hello"]))
+    result = bash.custom_commands["alpha"](["echo", "--message", "hello"])
+    print(result.exit_code, result.stdout, result.stderr)
 ```
+
+Python Just Bash hosts aren't standardized, so the helper registers callables on `custom_commands` or `commands` (a mapping or a list). Each callable takes the argument list and returns a `JustBashExecResult` with `stdout`, `stderr` and `exit_code`, the same shape as a TypeScript Just Bash `ExecResult`.
 
 ## Local tool functions
 
@@ -71,27 +74,22 @@ If your application already has executable tool functions in memory, you can ins
         bash=bash,
         server_name="alpha",
     )
+
+    bash.custom_commands["alpha"](["echo", "--message", "hello"])
     ```
 
 ## Command names
 
-TypeScript registers one command per server, named after the server, with one subcommand per tool. Several servers can expose tools with the same name without clashing:
+Both languages register one command per server, named after the server, with one subcommand per tool. Several servers can expose tools with the same name without clashing:
 
 ```text
 alpha echo --message hello
 beta echo --message hello
 ```
 
-The Python helpers register one callable per tool instead:
-
-- `install_just_bash_commands` uses the tool's command name (`echo`), prefixed with the server name only when two servers share it (`alpha_echo`, `beta_echo`).
-- `transform_tools_for_just_bash` always prefixes it: `alpha_echo`.
-
-Python callables return the tool output as a string and raise on errors. They don't print to stderr or set exit codes.
-
 ## Errors
 
-TypeScript commands follow the same argument and error rules as generated CLIs: usage errors exit `2` with a pointer to `--help`, and tool failures exit `1` with the tool's message on stderr. See [Arguments and errors](generated-clients.md#arguments-and-errors).
+Commands follow the same argument and error rules as generated CLIs: usage errors exit `2` with a pointer to `--help`, and tool failures exit `1` with the tool's message on stderr. See [Arguments and errors](generated-clients.md#arguments-and-errors).
 
 ## Lifecycle
 

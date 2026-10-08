@@ -14,6 +14,7 @@ from mcp_compressor import (
     BackendConfig,
     CompressedSessionConfig,
     CompressorClient,
+    JustBashExecResult,
     ToolSpec,
     compress_tool_listing,
     create_just_bash_commands,
@@ -271,9 +272,12 @@ def test_high_level_compressor_client_exposes_cli_and_bash_modes(monkeypatch) ->
             and command.invoke_tool_name == "alpha_invoke_tool"
             for command in providers["alpha"].tools
         )
+        # One command per server; same-named tools never collide.
         commands = {command.command_name: command for command in create_just_bash_commands(proxy)}
-        assert {"alpha_echo", "beta_echo"}.issubset(commands)
-        assert commands["alpha_echo"](["--message", "via-python-bash"]) == "alpha:via-python-bash"
+        assert set(commands) == {"alpha", "beta"}
+        result = commands["alpha"](["echo", "--message", "via-python-bash"])
+        assert result == JustBashExecResult(stdout="alpha:via-python-bash\n", stderr="", exit_code=0)
+        assert commands["beta"](["echo", "--message", "b"]).stdout == "beta:b\n"
 
         class ExistingBashHost:
             def __init__(self) -> None:
@@ -281,8 +285,8 @@ def test_high_level_compressor_client_exposes_cli_and_bash_modes(monkeypatch) ->
 
         host = ExistingBashHost()
         installed = install_just_bash_commands(host, proxy)
-        assert {command.command_name for command in installed}.issuperset({"alpha_echo", "beta_echo"})
-        assert "alpha_echo" in host.custom_commands
+        assert {command.command_name for command in installed} == {"alpha", "beta"}
+        assert set(host.custom_commands) == {"alpha", "beta"}
 
 
 def test_high_level_compressor_client_calls_auth_provider_each_time_servers_are_resolved() -> None:
