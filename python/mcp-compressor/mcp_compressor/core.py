@@ -174,6 +174,26 @@ def parse_tool_argv(tool: ToolSpec, argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def render_cli_top_level_help(command: str, tools: list[ToolSpec]) -> str:
+    """Render `<command> --help`, exactly as generated CLIs print it."""
+    return str(_native.render_cli_top_level_help_json(command, command, _tool_payload(tools)))
+
+
+def render_cli_subcommand_help(command: str, tool: ToolSpec) -> str:
+    """Render `<command> <subcommand> --help`, exactly as generated CLIs print it."""
+    return str(_native.render_cli_subcommand_help_json(command, _json_dumps(tool.to_json_dict())))
+
+
+def build_host_transform_plan(kind: str, server_name: str, tools: list[ToolSpec]) -> dict[str, Any]:
+    """Plan a host-side transform (help tool text, Just Bash command names) in the Rust core."""
+    config = {"kind": kind, "serverName": server_name, "tools": [tool.to_json_dict() for tool in tools]}
+    plan = json.loads(_native.build_host_transform_plan_json(_json_dumps(config)))
+    if not isinstance(plan, dict):
+        msg = "Rust core build_host_transform_plan_json returned non-object JSON"
+        raise TypeError(msg)
+    return plan
+
+
 def start_compressed_session(
     config: CompressedSessionConfig,
     backends: list[BackendConfig],

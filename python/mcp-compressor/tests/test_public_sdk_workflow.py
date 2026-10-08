@@ -8,7 +8,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from mcp_compressor import CompressorClient, ExecutableTool, transform_tools_for_just_bash
+from mcp_compressor import (
+    CompressorClient,
+    ExecutableTool,
+    JustBashExecResult,
+    JustBashServerCommand,
+    transform_tools_for_just_bash,
+)
 from mcp_compressor.core import generate_client_artifact_files
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -224,12 +230,48 @@ def test_public_python_sdk_direct_just_bash_transform() -> None:
             execute=lambda input=None: f"direct:{(input or {})['message']}",
         )
     }
+    tools["fail"] = ExecutableTool(
+        name="fail",
+        description="Always fails.",
+        input_schema={"type": "object", "properties": {}},
+        execute=_fail,
+    )
     bash = BashHost()
     result = transform_tools_for_just_bash(tools, bash=bash, server_name="alpha")
     assert list(result.tools) == ["alpha_help"]
-    assert "alpha_echo" in bash.custom_commands
-    assert bash.custom_commands["alpha_echo"](["--message", "python-bash"]) == "direct:python-bash"
-    assert "alpha_echo" in result.tools["alpha_help"].execute()
+    assert list(bash.custom_commands) == ["alpha"]
+    alpha = bash.custom_commands["alpha"]
+    assert isinstance(alpha, JustBashServerCommand)
+
+    assert alpha(["echo", "--message", "python-bash"]) == JustBashExecResult(
+        stdout="direct:python-bash\n", stderr="", exit_code=0
+    )
+    # Help is the shared generated-CLI help; the help tool describes the same command.
+    top_help = alpha(["--help"])
+    assert top_help.exit_code == 0
+    assert top_help.stdout.startswith("alpha - the alpha toolset")
+    assert "  echo  Echo a message." in top_help.stdout
+    assert alpha(["echo", "--help"]).stdout.startswith("alpha echo")
+    assert result.tools["alpha_help"].description == result.tools["alpha_help"].execute(None)
+    assert "provided via the `alpha` CLI" in result.tools["alpha_help"].execute(None)
+
+    # Usage errors exit 2 with a pointer to --help; tool failures exit 1.
+    assert alpha(["bogus"]) == JustBashExecResult(
+        stdout="",
+        stderr="parse error: unknown subcommand: bogus\nRun 'alpha --help' for usage.\n",
+        exit_code=2,
+    )
+    assert alpha(["echo"]) == JustBashExecResult(
+        stdout="",
+        stderr="validation error: missing required argument: --message\nRun 'alpha echo --help' for usage.\n",
+        exit_code=2,
+    )
+    assert alpha(["fail"]) == JustBashExecResult(stdout="", stderr="backend exploded: code 42\n", exit_code=1)
+
+
+def _fail(_input: dict[str, object] | None = None) -> str:
+    msg = "backend exploded: code 42"
+    raise RuntimeError(msg)
 
 
 def test_public_python_sdk_generated_file_map(tmp_path: Path) -> None:
