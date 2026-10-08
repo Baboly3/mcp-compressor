@@ -22,6 +22,8 @@ export interface NativeCore {
   rememberOauthBackendJson(backendUri: string, backendName: string, storeDir: string): void;
   listOauthCredentialsJson(): string;
   clearOauthCredentialsJson(target?: string | null): string;
+  /** Run the whole CLI in-process; blocks until it exits. */
+  runCliJson(argvJson: string): number;
   startCompressedSessionJson(
     configJson: string,
     backendsJson: string,
