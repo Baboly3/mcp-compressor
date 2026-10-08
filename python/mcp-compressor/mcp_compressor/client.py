@@ -68,7 +68,7 @@ class JustBashProvider:
 
 
 def _provider_from_value(value: ServerConfig) -> AuthProvider | None:
-    if not isinstance(value, dict):
+    if isinstance(value, (str, BackendConfig)):
         return None
     provider = value.get("auth_provider")
     if provider is None:
@@ -83,12 +83,12 @@ def _provider_from_value(value: ServerConfig) -> AuthProvider | None:
 
 def _backend_provider_payload(name: str, value: ServerConfig, provider_index: int | None) -> dict[str, Any]:
     backend = _backend_from_value(name, value, resolve_provider=provider_index is not None)
-    payload = {
+    payload: dict[str, Any] = {
         "name": backend.name,
         "command_or_url": backend.command_or_url,
         "args": backend.args or [],
     }
-    if isinstance(value, dict):
+    if not isinstance(value, (str, BackendConfig)):
         app_name = value.get("oauth_app_name", value.get("oauthAppName"))
         if app_name is not None:
             payload["oauth_app_name"] = str(app_name)

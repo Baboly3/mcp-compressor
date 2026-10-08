@@ -57,12 +57,6 @@
     mcp-compressor --help
     ```
 
-    You can also download a release artifact named for your platform, place it on `PATH`, and verify:
-
-    ```bash
-    mcp-compressor --help
-    ```
-
     From source:
 
     ```bash

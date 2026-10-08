@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
-from mcp_compressor import _native
+_native = importlib.import_module("mcp_compressor._native")
 
 
 def main(argv: list[str] | None = None) -> int:
