@@ -390,7 +390,10 @@ fn rust_cli_rejects_backend_options_before_separator() {
     .assert()
     .failure()
     .code(2)
-    .stderr(predicate::str::contains("unexpected argument '--cwd'"));
+    .stderr(predicate::str::starts_with(
+        "error: unexpected argument '--cwd' found",
+    ))
+    .stderr(predicate::str::contains("error: error:").not());
 }
 
 #[test]

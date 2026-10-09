@@ -59,6 +59,20 @@ fn auth_refresh_error() -> mcp_compressor_core::Error {
     mcp_compressor_core::Error::Config("auth provider refresh failed".to_string())
 }
 
+/// Run the full `mcp-compressor` CLI in-process and return its exit code.
+///
+/// Blocks the calling thread until the CLI exits, so the npm `mcp-compressor`
+/// bin works without a separately installed Rust binary. Not for library use.
+#[napi]
+pub fn run_cli_json(argv_json: String, version: Option<String>) -> napi::Result<i32> {
+    let argv: Vec<String> = serde_json::from_str(&argv_json)
+        .map_err(|error| NapiError::from_reason(error.to_string()))?;
+    if let Some(version) = version {
+        mcp_compressor_core::set_product_version(version);
+    }
+    Ok(mcp_compressor_core::app::entrypoint::run_to_exit_code(argv).into())
+}
+
 #[napi]
 pub fn compress_tool_listing_json(level: String, tools_json: String) -> napi::Result<String> {
     let level = level.parse::<CompressionLevel>().map_err(napi_error)?;

@@ -11,19 +11,33 @@ use crate::server::{
 };
 
 pub fn main_exit_code() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
+    ExitCode::from(run_to_exit_code(std::env::args()))
+}
+
+/// Run the CLI with `args` (including the program name), print any message,
+/// and return the process exit code: 0 on success or help, 2 for usage
+/// errors, 1 for runtime errors.
+///
+/// The binary and the Python and Node packages all call this, so every
+/// distribution prints and exits identically.
+pub fn run_to_exit_code<I, T>(args: I) -> u8
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match run_from(args) {
+        Ok(()) => 0,
         Err(CliError::Display(message)) => {
             print!("{message}");
-            ExitCode::SUCCESS
+            0
         }
         Err(CliError::Usage(message)) => {
             eprintln!("error: {message}");
-            ExitCode::from(2)
+            2
         }
         Err(CliError::Runtime(message)) => {
             eprintln!("error: {message}");
-            ExitCode::from(1)
+            1
         }
     }
 }
@@ -65,7 +79,10 @@ fn run_on_current_thread(args: Vec<std::ffi::OsString>) -> Result<(), CliError> 
         ) {
             CliError::Display(error.to_string())
         } else {
-            CliError::Usage(error.to_string())
+            // clap renders its own "error: " prefix; the printer adds ours.
+            let rendered = error.to_string();
+            let message = rendered.strip_prefix("error: ").unwrap_or(&rendered);
+            CliError::Usage(message.trim_end().to_string())
         }
     })?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

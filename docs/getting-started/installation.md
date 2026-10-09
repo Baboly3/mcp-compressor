@@ -57,12 +57,6 @@
     mcp-compressor --help
     ```
 
-    You can also download a release artifact named for your platform, place it on `PATH`, and verify:
-
-    ```bash
-    mcp-compressor --help
-    ```
-
     From source:
 
     ```bash
@@ -77,7 +71,7 @@
     mcp-compressor --help
     ```
 
-    The wrapper delegates to the Rust binary. Set `MCP_COMPRESSOR_BINARY` if the binary is not on `PATH`.
+    The package includes the Rust core as a native extension, so no separate binary is needed.
 
 === "TypeScript wrapper"
 
@@ -86,7 +80,7 @@
     mcp-compressor --help
     ```
 
-    The wrapper also delegates to the Rust binary. Set `MCP_COMPRESSOR_BINARY` to override binary discovery.
+    The package includes the Rust core as a native addon and runs the CLI in-process, so no separate binary is needed. Set `MCP_COMPRESSOR_BINARY` to run a specific `mcp-compressor` binary instead.
 
 ## Development from source
 

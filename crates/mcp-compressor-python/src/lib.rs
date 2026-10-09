@@ -272,23 +272,13 @@ fn clear_oauth_credentials_json(target: Option<&str>) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn run_cli_json(argv_json: &str) -> PyResult<i32> {
+#[pyo3(signature = (argv_json, version=None))]
+fn run_cli_json(argv_json: &str, version: Option<&str>) -> PyResult<i32> {
     let argv: Vec<String> = parse_json(argv_json)?;
-    match mcp_compressor_core::app::entrypoint::run_from(argv) {
-        Ok(()) => Ok(0),
-        Err(mcp_compressor_core::app::entrypoint::CliError::Display(message)) => {
-            print!("{message}");
-            Ok(0)
-        }
-        Err(mcp_compressor_core::app::entrypoint::CliError::Usage(message)) => {
-            eprintln!("error: {message}");
-            Ok(2)
-        }
-        Err(mcp_compressor_core::app::entrypoint::CliError::Runtime(message)) => {
-            eprintln!("error: {message}");
-            Ok(1)
-        }
+    if let Some(version) = version {
+        mcp_compressor_core::set_product_version(version);
     }
+    Ok(mcp_compressor_core::app::entrypoint::run_to_exit_code(argv).into())
 }
 
 #[pymodule]

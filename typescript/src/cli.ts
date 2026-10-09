@@ -2,10 +2,7 @@
 import { Command, Option } from "commander";
 
 import { spawn } from "node:child_process";
-import { accessSync, closeSync, constants, existsSync, openSync, readSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
+import { loadNativeCore } from "./native.js";
 import { VERSION } from "./version.js";
 
 import type { BackendConfig } from "./types.js";
@@ -215,106 +212,6 @@ function parseClearOAuthArgs(args: string[]): { target?: string; all: boolean } 
   return { ...(target ? { target } : {}), all: options.all ?? false };
 }
 
-/**
- * Resolve a bare binary name to an absolute path using the PATH environment
- * variable.  Returns null when the name cannot be found in any PATH directory.
- */
-function resolveFromPath(name: string): string | null {
-  const pathEnv = process.env.PATH ?? "";
-  const dirs = pathEnv.split(delimiter);
-  const exts =
-    process.platform === "win32" ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = join(dir, name + ext);
-      try {
-        accessSync(candidate, constants.X_OK);
-        return candidate;
-      } catch {
-        // not executable or not found — try next
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Return true when the file at `filePath` begins with a native-executable
- * magic number (ELF, Mach-O, or PE).  A JS shim that starts with a `#!`
- * shebang (or any other non-native header) returns false.
- *
- * This guards against the fork-bomb that occurs when the npm-installed
- * `mcp-compressor` bin shim is the only entry on PATH: spawning it would
- * re-invoke this very script rather than the Rust binary.
- */
-function isNativeExecutable(filePath: string): boolean {
-  let fd: number;
-  try {
-    fd = openSync(filePath, "r");
-  } catch {
-    return false;
-  }
-  try {
-    const buf = Buffer.alloc(4);
-    const n = readSync(fd, buf, 0, 4, 0);
-    if (n < 4) return false;
-    // ELF (Linux/BSD): \x7fELF
-    if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return true;
-    // PE (Windows): MZ
-    if (buf[0] === 0x4d && buf[1] === 0x5a) return true;
-    // Mach-O (macOS) — big-endian and little-endian variants, including fat/universal
-    const be = buf.readUInt32BE(0);
-    if (
-      be === 0xfeedface || // Mach-O 32-bit BE
-      be === 0xfeedfacf || // Mach-O 64-bit BE
-      be === 0xcefaedfe || // Mach-O 32-bit LE
-      be === 0xcffaedfe || // Mach-O 64-bit LE
-      be === 0xcafebabe || // Mach-O fat binary
-      be === 0xbebafeca // Mach-O fat binary LE
-    )
-      return true;
-    return false;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function candidateCoreBinaries(): string[] {
-  const candidates: string[] = [];
-  if (process.env.MCP_COMPRESSOR_BINARY) {
-    candidates.push(process.env.MCP_COMPRESSOR_BINARY);
-  }
-  // Resolve the bare name from PATH and only include it when the resolved
-  // file is a native binary, not a JS shim.  Without this check the npm bin
-  // shim (which maps `mcp-compressor` back to this very script) would be
-  // spawned indefinitely, creating a fork bomb.
-  const resolved = resolveFromPath("mcp-compressor");
-  if (resolved !== null && isNativeExecutable(resolved)) {
-    candidates.push(resolved);
-  }
-  const here = dirname(fileURLToPath(import.meta.url));
-  candidates.push(
-    join(
-      here,
-      "..",
-      "..",
-      "target",
-      "debug",
-      process.platform === "win32" ? "mcp-compressor.exe" : "mcp-compressor",
-    ),
-  );
-  candidates.push(
-    join(
-      process.cwd(),
-      "..",
-      "target",
-      "debug",
-      process.platform === "win32" ? "mcp-compressor.exe" : "mcp-compressor",
-    ),
-  );
-  return candidates;
-}
-
 function translateArgsForRust(args: string[]): string[] {
   const clearOAuth = parseClearOAuthArgs(args);
   if (clearOAuth) {
@@ -323,37 +220,45 @@ function translateArgsForRust(args: string[]): string[] {
   return args;
 }
 
+/**
+ * Run the Rust CLI. The npm package ships the native addon, so by default the
+ * CLI runs in-process and needs no separately installed binary (like the
+ * Python package). `MCP_COMPRESSOR_BINARY` runs a specific binary instead.
+ */
 async function runRustCoreCli(args: string[]): Promise<number> {
-  for (const binary of candidateCoreBinaries()) {
-    if (!existsSync(binary)) {
-      continue;
-    }
-    const child = spawn(binary, translateArgsForRust(args), { stdio: "inherit" });
-    return await new Promise((resolve, reject) => {
-      child.on("error", (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") {
-          resolve(127);
-          return;
-        }
-        reject(error);
-      });
-      child.on("exit", (code, signal) => {
-        if (signal) {
-          resolve(1);
-          return;
-        }
-        resolve(code ?? 0);
-      });
-    });
+  const rustArgs = translateArgsForRust(args);
+  const binary = process.env.MCP_COMPRESSOR_BINARY;
+  if (!binary) {
+    return loadNativeCore().runCliJson(JSON.stringify(["mcp-compressor", ...rustArgs]), VERSION);
   }
-  console.error(
-    "mcp-compressor binary was not found. Build it with `cargo build -p mcp-compressor-core` or set MCP_COMPRESSOR_BINARY.",
-  );
-  return 127;
+  return await new Promise((resolve, reject) => {
+    const child = spawn(binary, rustArgs, { stdio: "inherit" });
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        console.error(`MCP_COMPRESSOR_BINARY not found: ${binary}`);
+        resolve(127);
+        return;
+      }
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        resolve(1);
+        return;
+      }
+      resolve(code ?? 0);
+    });
+  });
 }
 
 async function main(): Promise<void> {
-  const exitCode = await runRustCoreCli(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
+    // The Rust core is versioned by the npm release, not its Cargo manifest.
+    console.log(`mcp-compressor ${VERSION}`);
+    return;
+  }
+  const exitCode = await runRustCoreCli(args);
   process.exitCode = exitCode;
 }
 
