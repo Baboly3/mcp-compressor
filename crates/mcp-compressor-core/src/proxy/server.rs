@@ -277,6 +277,20 @@ impl RunningToolProxy {
 }
 
 #[cfg(test)]
+pub(crate) mod close_lifecycle_tests {
+    use super::*;
+
+    pub(crate) async fn fail_listener(proxy: &mut RunningToolProxy) {
+        proxy.task.abort();
+        let _ = (&mut proxy.task).await;
+        proxy.task = tokio::spawn(async { panic!("lifecycle listener panic") });
+        while !proxy.task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
 mod concurrency_tests {
     use super::*;
     use crate::compression::CompressionLevel;
