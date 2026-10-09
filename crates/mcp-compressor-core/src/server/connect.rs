@@ -580,6 +580,52 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for BackendHttpClient<
         .await
     }
 
+    // rmcp's transport calls the size-limited variants; forward them so the
+    // inner client keeps enforcing the transport's SSE event size limit.
+    async fn post_message_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        self.request(self.inner.post_message_with_max_sse_event_size(
+            uri,
+            message,
+            session_id,
+            auth_header,
+            custom_headers,
+            max_sse_event_size,
+        ))
+        .await
+    }
+
+    async fn get_stream_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_header: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
+    ) -> Result<
+        BoxStream<'static, Result<sse_stream::Sse, SseError>>,
+        StreamableHttpError<Self::Error>,
+    > {
+        // Bound stream establishment, not the lifetime of the returned SSE body.
+        self.request(self.inner.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_header,
+            custom_headers,
+            max_sse_event_size,
+        ))
+        .await
+    }
+
     async fn delete_session(
         &self,
         uri: Arc<str>,
