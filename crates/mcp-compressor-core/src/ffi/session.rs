@@ -121,7 +121,21 @@ impl FfiCompressedSession {
         dispatch_exec(&self.server, tool.to_string(), input).await
     }
 
-    pub fn close(self) {}
+    pub async fn close(self) -> Result<(), Error> {
+        let Self { server, _proxy, .. } = self;
+        let proxy_result = match _proxy {
+            Some(proxy) => proxy
+                .shutdown()
+                .await
+                .map_err(|error| Error::Io(std::io::Error::other(error))),
+            None => Ok(()),
+        };
+        // Deliberately not ownership-based: connection tasks of a draining
+        // bridge may still hold a clone, and requiring exclusive ownership
+        // would skip the release and leak the backend process trees.
+        let backend_result = server.shutdown_shared().await;
+        proxy_result.and(backend_result)
+    }
 }
 
 fn parse_ffi_transform_mode(value: Option<&str>) -> Result<ProxyTransformMode, Error> {
@@ -477,5 +491,85 @@ mod before_exec_tests {
         bridge.unwrap().error_for_status().unwrap();
         in_process.unwrap();
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod close_lifecycle_tests {
+    use super::*;
+    use crate::ffi::dto::{FfiBackendConfig, FfiCompressedSessionConfig};
+
+    fn fixture(name: &str) -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[tokio::test]
+    async fn close_releases_backends_even_while_the_server_is_still_shared() {
+        check_close(false).await;
+    }
+
+    #[tokio::test]
+    async fn close_surfaces_listener_failure_after_releasing_backends() {
+        check_close(true).await;
+    }
+
+    async fn check_close(fail_listener: bool) {
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let mut session = start_compressed_session(
+            FfiCompressedSessionConfig {
+                compression_level: "max".to_string(),
+                server_name: Some("alpha".to_string()),
+                include_tools: Vec::new(),
+                exclude_tools: Vec::new(),
+                toonify: false,
+                transform_mode: None,
+                bridge: true,
+            },
+            vec![FfiBackendConfig {
+                name: "alpha".to_string(),
+                command_or_url: python,
+                args: vec![fixture("alpha_server.py")],
+                oauth_app_name: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        // Stands in for an HTTP bridge connection task that has not finished
+        // draining yet, so the session is not the only owner of the server.
+        let shared = Arc::clone(&session.server);
+
+        if fail_listener {
+            crate::proxy::server::close_lifecycle_tests::fail_listener(
+                session._proxy.as_mut().unwrap(),
+            )
+            .await;
+        }
+        let closed = session.close().await;
+
+        let invoked = dispatch_exec(
+            &shared,
+            "alpha_invoke_tool".to_string(),
+            serde_json::json!({ "tool_name": "echo", "tool_input": { "message": "after close" } }),
+        )
+        .await;
+        assert!(
+            invoked.is_err(),
+            "the backend must be released by close(), but it still answered: {invoked:?}"
+        );
+        if fail_listener {
+            let error = closed.expect_err("close must surface the listener panic");
+            assert!(
+                error.to_string().contains("lifecycle listener panic"),
+                "{error}"
+            );
+        } else {
+            closed.expect("close must release the session");
+        }
     }
 }
